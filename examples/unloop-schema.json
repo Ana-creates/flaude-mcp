@@ -1,0 +1,369 @@
+{
+  "app_name": "Unloop",
+  "domain": "mental_health",
+  "description": "Unloop helps people notice, understand, and gently break mental loops that keep them stuck. Grounded in behavioral science, expressed humanly.",
+
+  "entities": {
+    "user": {
+      "fields": {
+        "severity": ["minimal", "mild", "moderate", "moderate_high", "severe"],
+        "primary_concern": ["anxiety", "depression", "sleep", "stress", "general_wellbeing"],
+        "cr_level": ["easy", "moderate", "hard"],
+        "streak": "number",
+        "points": "number",
+        "level": "1-10",
+        "active_days": "number",
+        "challenges_completed": "number"
+      }
+    },
+    "biomarkers": {
+      "source": "sahha",
+      "fields": {
+        "sleep_score": "0.0-1.0",
+        "mental_score": "0.0-1.0",
+        "activity_score": "0.0-1.0",
+        "hrv": "0.0-1.0"
+      },
+      "thresholds": {
+        "poor": "0.00-0.40",
+        "fair": "0.41-0.60",
+        "good": "0.61-0.80",
+        "optimal": "0.81-1.00"
+      }
+    },
+    "journal_analysis": {
+      "fields": {
+        "themes": ["sleep_disruption", "work_stress", "social_anxiety", "relationship_issues", "health_concerns", "financial_stress", "self_criticism", "rumination"],
+        "intensity": ["low", "medium", "high", "crisis"],
+        "energy": ["low", "medium", "high"],
+        "triggers": "string[]"
+      }
+    },
+    "cr_session": {
+      "fields": {
+        "belief_before": "0-100",
+        "belief_after": "0-100",
+        "belief_shift": "number",
+        "distortions_identified": "string[]",
+        "escape_hatch_used": "boolean"
+      }
+    }
+  },
+
+  "states": {
+    "home_screen": [
+      {
+        "name": "crisis_support",
+        "condition": "mental_score < 0.30 OR journal_intensity == 'crisis'",
+        "priority": 1,
+        "content": {
+          "hero": "I notice things feel heavy right now.",
+          "subtext": "You don't have to push through. Here's something gentle.",
+          "tone": "soft",
+          "challenge_type": "gentle",
+          "show_crisis_resources": true
+        }
+      },
+      {
+        "name": "comeback",
+        "condition": "last_active > 3 days",
+        "priority": 2,
+        "content": {
+          "hero": "Welcome back, {name}. No judgment here.",
+          "subtext": "It's been {days_away} days. Let's start small.",
+          "tone": "warm",
+          "challenge_type": "easy"
+        }
+      },
+      {
+        "name": "struggling",
+        "condition": "sleep_trend == 'down' AND mental_score < 0.50",
+        "priority": 3,
+        "content": {
+          "hero": "Your sleep's been rough this week.",
+          "subtext": "That affects everything. Let's focus there first.",
+          "tone": "understanding",
+          "challenge_type": "sleep_focused"
+        }
+      },
+      {
+        "name": "celebration",
+        "condition": "streak in [7, 14, 21, 30] OR just_leveled_up",
+        "priority": 4,
+        "content": {
+          "hero": "{streak} days. You're building something real.",
+          "subtext": "This consistency is rewiring your brain.",
+          "tone": "proud",
+          "show_achievement": true
+        }
+      },
+      {
+        "name": "insight_reveal",
+        "condition": "new_insight_available",
+        "priority": 5,
+        "content": {
+          "hero": "I noticed something about your patterns.",
+          "subtext": "{insight_teaser}",
+          "tone": "curious",
+          "show_insight_card": true
+        }
+      },
+      {
+        "name": "morning_checkin",
+        "condition": "time == 'morning' AND !completed_journal_today",
+        "priority": 6,
+        "content": {
+          "hero": "Good morning, {name}.",
+          "subtext": "Start with a check-in?",
+          "tone": "gentle",
+          "challenge_type": "journaling"
+        }
+      },
+      {
+        "name": "evening_reflection",
+        "condition": "time == 'evening'",
+        "priority": 7,
+        "content": {
+          "hero": "Winding down for the day?",
+          "subtext": "Let's reflect on today.",
+          "tone": "calm",
+          "challenge_type": "reflection"
+        }
+      },
+      {
+        "name": "active",
+        "condition": "default",
+        "priority": 8,
+        "content": {
+          "hero": "Hey, {name}.",
+          "subtext": "Ready for today's challenge?",
+          "tone": "energized",
+          "challenge_type": "next_in_roadmap"
+        }
+      }
+    ]
+  },
+
+  "challenge_selection_rules": [
+    {
+      "if": "sleep_disruption in journal_themes AND time == 'evening'",
+      "then": "worry_dump_journal",
+      "reason": "Target racing thoughts at night"
+    },
+    {
+      "if": "work_stress in journal_themes",
+      "then": "box_breathing",
+      "reason": "Immediate anxiety relief"
+    },
+    {
+      "if": "sleep_score < 0.40",
+      "then": "sleep_intervention",
+      "reason": "Sleep is critically low"
+    },
+    {
+      "if": "mental_score < 0.50 AND journal_energy == 'low'",
+      "then": "behavioral_activation",
+      "reason": "Need movement for energy"
+    },
+    {
+      "if": "cr_level == 'easy' AND escape_hatch_rate < 0.2",
+      "then": "cr_moderate_challenge",
+      "reason": "Ready to level up"
+    },
+    {
+      "if": "dominant_distortion == 'catastrophizing'",
+      "then": "cr_decatastrophizing",
+      "reason": "Target specific distortion"
+    }
+  ],
+
+  "exercises": {
+    "journaling": {
+      "variants": ["morning", "evening", "worry_dump", "gratitude", "reflective"],
+      "duration_minutes": 15,
+      "points": 200,
+      "data_collected": ["sentiment", "themes", "intensity", "energy", "triggers"]
+    },
+    "cognitive_restructuring": {
+      "levels": {
+        "easy": {
+          "screens": 7,
+          "features": ["belief_rating", "supporting", "contradicting", "distortion_no_labels", "reframe", "re_rate", "validation"],
+          "distortion_labels": false,
+          "core_beliefs": false,
+          "behavioral_experiments": false
+        },
+        "moderate": {
+          "screens": 8,
+          "features": ["belief_rating", "supporting_with_labels", "contradicting", "distortion_with_labels", "pattern_recognition", "reframe", "journey_summary", "re_rate", "validation"],
+          "distortion_labels": true,
+          "core_beliefs": "optional",
+          "behavioral_experiments": false
+        },
+        "hard": {
+          "screens": 10,
+          "features": ["belief_rating", "supporting_deep", "contradicting", "distortion_nuanced", "downward_arrow", "core_belief_identification", "socratic_questioning", "reframe", "behavioral_experiment_planning", "validation"],
+          "distortion_labels": true,
+          "core_beliefs": true,
+          "behavioral_experiments": true
+        }
+      },
+      "level_up_criteria": {
+        "easy_to_moderate": "completed >= 10 OR day >= 15 OR avg_belief_shift >= 20",
+        "moderate_to_hard": "completed >= 20 OR day >= 31 OR (avg_belief_shift >= 30 AND escape_hatch_count < 2)"
+      },
+      "points": {
+        "standard": 100,
+        "extended": 150
+      }
+    },
+    "breathing": {
+      "variants": ["box_breathing", "4_7_8_breathing", "diaphragmatic"],
+      "duration_minutes": 5,
+      "points": 100
+    },
+    "behavioral_activation": {
+      "variants": ["morning_walk", "schedule_enjoyable_activity", "social_connection"],
+      "duration_minutes": 10,
+      "points": 100
+    }
+  },
+
+  "distortions": [
+    {
+      "id": "catastrophizing",
+      "label": "Catastrophizing",
+      "accessible_description": "My anxiety makes me see things worse than they are",
+      "clinical_description": "Expecting the worst possible outcome"
+    },
+    {
+      "id": "mind_reading",
+      "label": "Mind Reading",
+      "accessible_description": "I'm guessing what others think of me",
+      "clinical_description": "Assuming you know what others are thinking without evidence"
+    },
+    {
+      "id": "all_or_nothing",
+      "label": "All-or-Nothing Thinking",
+      "accessible_description": "I see things in black and white with no middle ground",
+      "clinical_description": "Viewing situations in only two categories instead of on a continuum"
+    },
+    {
+      "id": "emotional_reasoning",
+      "label": "Emotional Reasoning",
+      "accessible_description": "I believe my feelings are facts",
+      "clinical_description": "Assuming that negative emotions reflect reality"
+    },
+    {
+      "id": "should_statements",
+      "label": "Should Statements",
+      "accessible_description": "I use should/must language and judge myself harshly",
+      "clinical_description": "Using critical words like 'should', 'must', 'ought' directed at self"
+    },
+    {
+      "id": "personalization",
+      "label": "Personalization",
+      "accessible_description": "I blame myself for things outside my control",
+      "clinical_description": "Believing you are responsible for events outside your control"
+    },
+    {
+      "id": "fortune_telling",
+      "label": "Fortune Telling",
+      "accessible_description": "I assume I know the future will be bad",
+      "clinical_description": "Predicting negative outcomes without evidence"
+    },
+    {
+      "id": "discounting_positive",
+      "label": "Discounting the Positive",
+      "accessible_description": "I dismiss good things as not counting",
+      "clinical_description": "Rejecting positive experiences by insisting they don't count"
+    }
+  ],
+
+  "severity_roadmap": {
+    "minimal": {
+      "duration_days": 21,
+      "daily_challenges": 2,
+      "journaling_required": false,
+      "point_multiplier": 1.0
+    },
+    "mild": {
+      "duration_days": 30,
+      "daily_challenges": 2,
+      "journaling_required": false,
+      "point_multiplier": 1.1
+    },
+    "moderate": {
+      "duration_days": 45,
+      "daily_challenges": 3,
+      "journaling_required": true,
+      "point_multiplier": 1.3
+    },
+    "moderate_high": {
+      "duration_days": 60,
+      "daily_challenges": 3,
+      "journaling_required": true,
+      "point_multiplier": 1.4
+    },
+    "severe": {
+      "duration_days": 90,
+      "daily_challenges": 3,
+      "journaling_required": true,
+      "point_multiplier": 1.5
+    }
+  },
+
+  "levels": [
+    { "level": 1, "name": "Starting Out", "points": 0 },
+    { "level": 2, "name": "Finding Your Rhythm", "points": 500 },
+    { "level": 3, "name": "Building Momentum", "points": 1500 },
+    { "level": 4, "name": "Gaining Confidence", "points": 3500 },
+    { "level": 5, "name": "Getting Stronger", "points": 7000 },
+    { "level": 6, "name": "Becoming Consistent", "points": 12000 },
+    { "level": 7, "name": "Thriving", "points": 18000 },
+    { "level": 8, "name": "Flourishing", "points": 25000 },
+    { "level": 9, "name": "Mastering Your Journey", "points": 32000 },
+    { "level": 10, "name": "Inspiring Others", "points": 38000 }
+  ],
+
+  "insights": {
+    "patterns_to_detect": [
+      {
+        "id": "sleep_catastrophizing_correlation",
+        "description": "User catastrophizes more when sleep is poor",
+        "condition": "correlation(sleep_score < 0.5, distortion == 'catastrophizing') > 0.6",
+        "message": "When you sleep under 5 hours, catastrophizing jumps 60%"
+      },
+      {
+        "id": "morning_belief_shift",
+        "description": "User has better CR outcomes in morning",
+        "condition": "avg_belief_shift(morning) > avg_belief_shift(afternoon) * 1.3",
+        "message": "Your belief shifts are 40% higher before noon"
+      },
+      {
+        "id": "journal_cr_combo",
+        "description": "Journaling before CR improves outcomes",
+        "condition": "outcomes(journal + cr_same_day) > outcomes(cr_only) * 1.5",
+        "message": "Days with journaling + CR have 2x better belief shifts"
+      }
+    ]
+  },
+
+  "flows": {
+    "onboarding": {
+      "steps": ["welcome", "phq2", "gad2", "full_assessment_if_needed", "sahha_permissions", "goals", "roadmap_generation"]
+    },
+    "home_to_journaling": {
+      "steps": ["home", "challenge_card", "journaling_welcome", "initial_prompt", "follow_up_prompt", "closing_prompt", "completion", "points_awarded"]
+    },
+    "home_to_cr_easy": {
+      "steps": ["home", "challenge_card", "belief_rating", "supporting", "contradicting", "distortion", "reframe", "re_rate", "validation"]
+    },
+    "home_to_cr_moderate": {
+      "steps": ["home", "challenge_card", "belief_rating", "supporting_with_labels", "contradicting", "distortion_with_labels", "pattern_recognition", "reframe", "journey_summary", "re_rate", "validation"]
+    },
+    "home_to_cr_hard": {
+      "steps": ["home", "challenge_card", "belief_rating", "supporting_deep", "contradicting", "distortion", "downward_arrow", "core_belief", "socratic_questioning", "reframe", "behavioral_experiment", "re_rate", "validation"]
+    }
+  }
+}

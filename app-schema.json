@@ -1,0 +1,68 @@
+{
+  "_comment": "This is your app schema. Customize it for YOUR app. Claude will use this to understand your design system.",
+
+  "app_name": "Your App Name",
+  "domain": "your_domain",
+  "description": "Brief description of what your app does",
+
+  "entities": {
+    "_comment": "Define your data models here",
+    "user": {
+      "fields": {
+        "example_field": "type or enum values"
+      }
+    }
+  },
+
+  "states": {
+    "_comment": "Define screen states that should exist in your app",
+    "home_screen": [
+      {
+        "name": "default",
+        "condition": "default state",
+        "content": {
+          "hero": "Main message",
+          "subtext": "Supporting text"
+        }
+      }
+    ]
+  },
+
+  "flows": {
+    "_comment": "Define user flows as sequences of screens",
+    "main_flow": {
+      "steps": ["screen1", "screen2", "screen3"]
+    }
+  },
+
+  "components": {
+    "_comment": "Define reusable component types",
+    "card": {
+      "variants": ["default", "highlighted", "disabled"]
+    },
+    "button": {
+      "variants": ["primary", "secondary", "ghost"]
+    }
+  },
+
+  "design_tokens": {
+    "_comment": "Define your design system tokens",
+    "colors": {
+      "primary": "#000000",
+      "secondary": "#666666",
+      "background": "#FFFFFF"
+    },
+    "spacing": {
+      "xs": 4,
+      "sm": 8,
+      "md": 16,
+      "lg": 24,
+      "xl": 32
+    },
+    "typography": {
+      "heading_lg": { "size": 32, "weight": "Bold" },
+      "heading_md": { "size": 24, "weight": "Bold" },
+      "body": { "size": 16, "weight": "Regular" }
+    }
+  }
+}
