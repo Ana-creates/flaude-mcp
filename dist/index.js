@@ -1,739 +1,813 @@
 #!/usr/bin/env node
 /**
- * Figma Editor MCP Server
+ * Figma Editor MCP Server (v2 - Simplified)
  *
- * An MCP server that enables Claude to READ and WRITE to Figma files
- * through a WebSocket connection to a companion Figma plugin.
+ * 4 tools instead of 50+. All design operations go through figma_execute.
  *
  * Architecture:
- * Claude -> MCP Server -> WebSocket -> Figma Plugin -> Figma File
+ * Claude -> MCP Server (stdio) -> WebSocket (9876) -> Figma Plugin -> Figma File
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSchema, ReadResourceRequestSchema, } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema, } from '@modelcontextprotocol/sdk/types.js';
 import { WebSocketServer, WebSocket } from 'ws';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as https from 'https';
-import * as http from 'http';
-// Fetch HTML from URL
-async function fetchURL(url) {
-    return new Promise((resolve, reject) => {
-        const protocol = url.startsWith('https') ? https : http;
-        const request = protocol.get(url, {
+import { fileURLToPath } from 'url';
+import path from 'path';
+import crypto from 'crypto';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PACKAGE_ROOT = path.resolve(__dirname, '..');
+// Configuration
+const WS_PORT = 9876;
+const REQUEST_TIMEOUT = 30000;
+const DEV_MODE = false;
+// State
+let connectedPlugin = null;
+let isProxyMode = false;
+const pendingRequests = new Map();
+let isAuthenticated = false;
+let authenticatedEmail = null;
+// Subscription verification via Supabase (no secrets in package)
+const SUPABASE_URL = 'https://lrgwkvmiihatpfiesima.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_NCa4zE_gcw-6ns_Cu53yXQ_Y873IfDC';
+const SUBSCRIPTION_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+const subscriptionCache = new Map();
+async function verifySubscription(email) {
+    const normalized = email.toLowerCase().trim();
+    // Check cache first
+    const cached = subscriptionCache.get(normalized);
+    if (cached && Date.now() < cached.expiry) {
+        return cached.valid;
+    }
+    try {
+        const response = await fetch(`${SUPABASE_URL}/rest/v1/Subscription?email=eq.${encodeURIComponent(normalized)}&status=eq.active&select=currentPeriodEnd&order=currentPeriodEnd.desc&limit=1`, {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            }
-        }, (response) => {
-            // Handle redirects
-            if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-                fetchURL(response.headers.location).then(resolve).catch(reject);
-                return;
-            }
-            if (response.statusCode && response.statusCode >= 400) {
-                reject(new Error(`HTTP ${response.statusCode}: Failed to fetch ${url}`));
-                return;
-            }
-            let data = '';
-            response.on('data', chunk => data += chunk);
-            response.on('end', () => resolve(data));
-            response.on('error', reject);
+                apikey: SUPABASE_ANON_KEY,
+                Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+            },
+            signal: AbortSignal.timeout(10000),
         });
-        request.on('error', reject);
-        request.setTimeout(15000, () => {
-            request.destroy();
-            reject(new Error('Request timed out'));
+        if (!response.ok) {
+            console.error(`[MCP] Supabase query failed: ${response.status}`);
+            // On API error, allow cached valid users to continue (grace period)
+            return cached?.valid ?? false;
+        }
+        const data = await response.json();
+        let valid = false;
+        if (data.length > 0 && data[0].currentPeriodEnd) {
+            const periodEnd = new Date(data[0].currentPeriodEnd);
+            valid = !isNaN(periodEnd.getTime()) && periodEnd > new Date();
+        }
+        subscriptionCache.set(normalized, { valid, expiry: Date.now() + SUBSCRIPTION_CACHE_TTL });
+        return valid;
+    }
+    catch (err) {
+        console.error('[MCP] Subscription check failed:', err);
+        // Network error — allow cached valid users to continue
+        return cached?.valid ?? false;
+    }
+}
+// ============================================================================
+// WebSocket Communication
+// ============================================================================
+function startWebSocketServer() {
+    return new Promise((resolve, reject) => {
+        const wss = new WebSocketServer({ port: WS_PORT });
+        wss.on('listening', () => {
+            console.error(`[MCP] WebSocket server started on port ${WS_PORT}`);
+            setupServerMode(wss);
+            resolve(wss);
+        });
+        wss.on('error', (error) => {
+            if (error.code === 'EADDRINUSE') {
+                console.error(`[MCP] Port ${WS_PORT} already in use - switching to proxy mode`);
+                connectAsProxy();
+                resolve(null);
+            }
+            else {
+                console.error('[MCP] WebSocket server error:', error);
+                reject(error);
+            }
         });
     });
 }
-// Extract main content from HTML (simplify for Figma)
-function simplifyHTML(html) {
-    // Remove scripts, styles, and other non-visual elements
-    let simplified = html
-        .replace(/<script[\s\S]*?<\/script>/gi, '')
-        .replace(/<style[\s\S]*?<\/style>/gi, '')
-        .replace(/<link[^>]*>/gi, '')
-        .replace(/<meta[^>]*>/gi, '')
-        .replace(/<noscript[\s\S]*?<\/noscript>/gi, '')
-        .replace(/<!--[\s\S]*?-->/g, '')
-        .replace(/<head[\s\S]*?<\/head>/gi, '');
-    // Try to extract body content
-    const bodyMatch = simplified.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
-    if (bodyMatch) {
-        simplified = bodyMatch[1];
-    }
-    // Clean up whitespace
-    simplified = simplified
-        .replace(/\s+/g, ' ')
-        .replace(/>\s+</g, '><')
-        .trim();
-    return simplified;
-}
-// Configuration
-const WS_PORT = 9876;
-const REQUEST_TIMEOUT = 30000; // 30 seconds
-// State
-let connectedPlugin = null;
-const pendingRequests = new Map();
-let requestCounter = 0;
-// Load app schema if it exists (generic - works for any app)
-function loadSchema() {
-    // Check multiple possible schema locations
-    const possiblePaths = [
-        path.join(process.cwd(), 'app-schema.json'),
-        path.join(process.cwd(), 'schema.json'),
-        path.join(process.cwd(), 'app-schema.yaml'),
-        path.join(process.cwd(), 'schema.yaml'),
-    ];
-    for (const schemaPath of possiblePaths) {
-        if (fs.existsSync(schemaPath)) {
-            const content = fs.readFileSync(schemaPath, 'utf-8');
-            if (schemaPath.endsWith('.json')) {
-                return JSON.parse(content);
-            }
-            else {
-                // Basic YAML - return as raw for now
-                return { raw: content, format: 'yaml' };
-            }
-        }
-    }
-    return null;
-}
-// WebSocket Server for Plugin Communication
-function startWebSocketServer() {
-    const wss = new WebSocketServer({ port: WS_PORT });
-    console.error(`[MCP] WebSocket server started on port ${WS_PORT}`);
+function setupServerMode(wss) {
     wss.on('connection', (ws) => {
-        console.error('[MCP] Figma plugin connected');
-        connectedPlugin = ws;
+        console.error('[MCP] New connection - waiting for authentication...');
+        // Ping/pong to detect dead connections
+        let isAlive = true;
+        ws.on('pong', () => { isAlive = true; });
+        const pingInterval = setInterval(() => {
+            if (!isAlive) {
+                console.error('[MCP] Connection dead (no pong) - terminating');
+                clearInterval(pingInterval);
+                ws.terminate();
+                return;
+            }
+            isAlive = false;
+            ws.ping();
+        }, 30000);
+        ws.on('close', () => clearInterval(pingInterval));
         ws.on('message', (data) => {
             try {
                 const message = JSON.parse(data.toString());
-                if (message.requestId && pendingRequests.has(message.requestId)) {
-                    const pending = pendingRequests.get(message.requestId);
+                if (message.type === 'auth') {
+                    handleAuthentication(ws, message);
+                    return;
+                }
+                // Handle proxy commands before auth check — proxy instances
+                // rely on the primary server's auth state, not their own
+                if (message.type === 'proxy_command') {
+                    if (!isAuthenticated) {
+                        ws.send(JSON.stringify({
+                            type: 'proxy_error',
+                            requestId: message.requestId,
+                            error: 'Figma plugin not authenticated. Open the Flaude plugin and click Connect.',
+                        }));
+                        return;
+                    }
+                    handleProxyCommand(ws, message);
+                    return;
+                }
+                if (!isAuthenticated) {
+                    ws.send(JSON.stringify({
+                        type: 'error',
+                        error: 'Authentication required. Please upgrade to Flaude Pro.',
+                    }));
+                    return;
+                }
+                const pluginMessage = message;
+                if (pluginMessage.requestId && pendingRequests.has(pluginMessage.requestId)) {
+                    const pending = pendingRequests.get(pluginMessage.requestId);
                     clearTimeout(pending.timeout);
-                    pendingRequests.delete(message.requestId);
-                    if (message.type === 'error') {
-                        pending.reject(new Error(message.error || 'Unknown plugin error'));
+                    pendingRequests.delete(pluginMessage.requestId);
+                    if (pluginMessage.type === 'error') {
+                        pending.reject(new Error(pluginMessage.error || 'Unknown plugin error'));
                     }
                     else {
-                        pending.resolve(message.data);
+                        pending.resolve(pluginMessage.data);
                     }
                 }
             }
             catch (e) {
-                console.error('[MCP] Failed to parse plugin message:', e);
+                console.error('[MCP] Failed to parse message:', e);
             }
         });
         ws.on('close', () => {
-            console.error('[MCP] Figma plugin disconnected');
             if (connectedPlugin === ws) {
+                console.error('[MCP] Figma plugin disconnected');
                 connectedPlugin = null;
-            }
-            // Reject all pending requests
-            for (const [id, pending] of pendingRequests) {
-                clearTimeout(pending.timeout);
-                pending.reject(new Error('Plugin disconnected'));
-                pendingRequests.delete(id);
+                isAuthenticated = false;
+                authenticatedEmail = null;
+                for (const [id, pending] of pendingRequests) {
+                    clearTimeout(pending.timeout);
+                    pending.reject(new Error('Plugin disconnected'));
+                    pendingRequests.delete(id);
+                }
             }
         });
         ws.on('error', (error) => {
             console.error('[MCP] WebSocket error:', error);
         });
     });
-    return wss;
 }
-// Send command to plugin and wait for response
+async function handleAuthentication(ws, message) {
+    const { email } = message;
+    if (DEV_MODE) {
+        console.error(`[MCP] DEV MODE: Skipping license validation for ${email || 'unknown'}`);
+        isAuthenticated = true;
+        authenticatedEmail = email || 'dev@flaude.app';
+        connectedPlugin = ws;
+        ws.send(JSON.stringify({ type: 'auth_result', success: true, email: authenticatedEmail }));
+        return;
+    }
+    if (!email) {
+        ws.send(JSON.stringify({ type: 'auth_result', success: false, error: 'Flaude Pro license required.' }));
+        return;
+    }
+    // Verify subscription against Supabase (no local secrets)
+    const hasActiveSubscription = await verifySubscription(email);
+    if (!hasActiveSubscription) {
+        ws.send(JSON.stringify({ type: 'auth_result', success: false, error: 'No active Flaude Pro subscription found for this email.' }));
+        return;
+    }
+    console.error(`[MCP] Authentication successful for: ${email}`);
+    isAuthenticated = true;
+    authenticatedEmail = email;
+    connectedPlugin = ws;
+    ws.send(JSON.stringify({ type: 'auth_result', success: true, email }));
+}
+async function handleProxyCommand(proxyClient, message) {
+    try {
+        const result = await sendToPlugin(message.command, message.params);
+        proxyClient.send(JSON.stringify({ type: 'proxy_response', requestId: message.requestId, data: result }));
+    }
+    catch (error) {
+        proxyClient.send(JSON.stringify({ type: 'proxy_error', requestId: message.requestId, error: error instanceof Error ? error.message : String(error) }));
+    }
+}
+function connectAsProxy() {
+    isProxyMode = true;
+    const ws = new WebSocket(`ws://localhost:${WS_PORT}`);
+    ws.on('open', () => {
+        console.error('[MCP] Connected to existing MCP server in proxy mode');
+        connectedPlugin = ws;
+        // In proxy mode, the primary server handles authentication.
+        // Mark as authenticated so sendToPlugin() doesn't block commands.
+        isAuthenticated = true;
+    });
+    ws.on('message', (data) => {
+        try {
+            const message = JSON.parse(data.toString());
+            if (message.type === 'proxy_response' || message.type === 'proxy_error') {
+                const pending = pendingRequests.get(message.requestId);
+                if (pending) {
+                    clearTimeout(pending.timeout);
+                    pendingRequests.delete(message.requestId);
+                    if (message.type === 'proxy_error') {
+                        pending.reject(new Error(message.error || 'Proxy error'));
+                    }
+                    else {
+                        pending.resolve(message.data);
+                    }
+                }
+            }
+        }
+        catch (e) {
+            console.error('[MCP] Failed to parse proxy response:', e);
+        }
+    });
+    ws.on('close', () => { connectedPlugin = null; });
+    ws.on('error', (error) => { console.error('[MCP] Proxy error:', error); });
+}
 function sendToPlugin(command, params) {
     return new Promise((resolve, reject) => {
-        if (!connectedPlugin || connectedPlugin.readyState !== WebSocket.OPEN) {
-            reject(new Error('Figma plugin not connected. Please open the FigmaClaude plugin in Figma.'));
+        if (!isAuthenticated) {
+            reject(new Error('Flaude Pro license required.'));
             return;
         }
-        const requestId = `req_${++requestCounter}_${Date.now()}`;
+        if (!connectedPlugin || connectedPlugin.readyState !== WebSocket.OPEN) {
+            reject(new Error('Figma plugin not connected. Open the Flaude plugin in Figma and click Connect.'));
+            return;
+        }
+        const requestId = `req_${crypto.randomUUID()}`;
         const timeout = setTimeout(() => {
             pendingRequests.delete(requestId);
             reject(new Error(`Request timed out after ${REQUEST_TIMEOUT}ms`));
         }, REQUEST_TIMEOUT);
         pendingRequests.set(requestId, { resolve, reject, timeout });
-        connectedPlugin.send(JSON.stringify({
-            requestId,
-            command,
-            params,
-        }));
+        if (isProxyMode) {
+            connectedPlugin.send(JSON.stringify({ type: 'proxy_command', requestId, command, params }));
+        }
+        else {
+            connectedPlugin.send(JSON.stringify({ requestId, command, params }));
+        }
     });
 }
-// Tool Definitions
+// ============================================================================
+// MCP Server + 4 Tools
+// ============================================================================
+const SERVER_INSTRUCTIONS = `## Flaude MCP - AI Design Assistant for Figma
+
+You have full access to the Figma Plugin API via figma_execute. Follow these workflows strictly.
+
+### CRITICAL RULE #0 — READ THE DESIGN SYSTEM FIRST
+**Before creating ANY new design**, you MUST read the design system file:
+\`${path.join(PACKAGE_ROOT, 'DESIGN_SYSTEM.md')}\`
+
+This file contains mandatory rules for typography, colors, spacing, hierarchy, layout patterns, and validation.
+Every design you create MUST comply with these rules. They are not suggestions — they are requirements.
+If a design personality file exists for the project, also read it from \`design-personalities/\` in the current working directory.
+
+### CRITICAL RULE #1 — ICONS AND COMPONENTS
+**NEVER draw icons using shapes, vectors, or paths. ALWAYS import them from the Flaude Components library.**
+Every icon in every design MUST come from the library. No exceptions.
+
+**How to import a component:**
+1. Read the file: flaude-components.json (in the current working directory)
+2. Search for the component by name (e.g. "lock", "arrow", "chevron", "user", "search", "menu")
+3. Import it:
+\`\`\`javascript
+const component = await figma.importComponentByKeyAsync("KEY_FROM_JSON");
+const instance = component.createInstance();
+parentFrame.appendChild(instance);
+instance.resize(24, 24); // Resize as needed
+\`\`\`
+
+**Component naming patterns:**
+- Icons: "Hicon / Linear / [name]" or "Hicon / Outline / [name]"
+- Arrows: "Arrows/arrow/[direction]" or "Arrows/chevron/[direction]"
+- Documents: "Documents & Safety/[name]"
+- Essentials: "Essentials/[name]"
+
+**If the import fails**, tell the user: "Please enable the Flaude Components library: File → Libraries → Search 'Flaude' → Add to file"
+Library URL: https://www.figma.com/community/file/1601415084476940997
+
+### CONSISTENT SCREEN SIZES (CRITICAL)
+**Before creating a new screen, ALWAYS check existing screen sizes on the page:**
+\`\`\`javascript
+const screens = figma.currentPage.children.filter(c => c.type === "FRAME" && c.width >= 390 && c.width <= 430);
+if (screens.length > 0) {
+  const refWidth = screens[0].width;
+  const refHeight = screens[0].height;
+  newScreen.resize(refWidth, refHeight);
+}
+\`\`\`
+If no existing screens exist, use standard iPhone 15 size: **393 x 852**.
+**NEVER create a screen with different dimensions than existing screens on the same page.**
+
+---
+
+## DESIGN WORKFLOW (MANDATORY — 8 STEPS)
+
+When creating ANY design, follow this exact order. No shortcuts.
+
+### STEP 0 — LOAD DESIGN SYSTEM + SCAN EXISTING CONTEXT
+**A.** Read \`${path.join(PACKAGE_ROOT, 'DESIGN_SYSTEM.md')}\` and internalize the type scale, color palette, spacing grid, layout patterns, and anti-patterns.
+
+**B.** If a design personality is active, read it from \`design-personalities/[NAME].md\` in the current working directory
+Available: BOLD, MINIMAL, SOFT, EDITORIAL, BRUTALIST — personality overrides default values.
+
+**C.** Run the **Context Scan** from DESIGN_SYSTEM.md section 13 to detect existing fonts, sizes, colors, spacing, and screen dimensions. Match these in your new design — consistency with existing work is critical.
+
+### STEP 1 — DESIGN PLAN (before writing ANY code)
+Write out a structured plan:
+
+**A. Layout Structure**
+- Which layout pattern applies? (List, Card Feed, Detail, Form, or hybrid)
+- What are the major sections from top to bottom?
+- What is the visual hierarchy? (What is Level 1/hero? Level 2? Level 3?)
+- What is the ONE focal point of this screen?
+
+**B. Design Tokens Selection**
+- Background color: (pick from palette)
+- Text colors: (pick primary, secondary, tertiary from palette)
+- Accent color: (one only, or black default)
+- Font sizes: (pick 3-5 from the type scale — no more)
+- Spacing values: (pick 3-4 from the spacing scale for this screen)
+- Corner radius: (consistent value — 8, 12, or 16)
+
+**C. Element Inventory**
+- List EVERY element: status bar, icons, text, cards, images, badges, nav bars
+- Note exact styling: border-radius, shadows, gradients, opacity
+- List ALL icons needed (will load from components library)
+- Note interactive states: active tabs, selected indicators
+
+### STEP 2 — LOAD COMPONENTS
+Read flaude-components.json and find keys for ALL icons identified in Step 1.
+Also check existing screens on the page for established fonts, colors, and spacing.
+
+### STEP 3 — BUILD SYSTEMATICALLY
+Build from top to bottom, outside to inside:
+- **FIRST: Position the new screen so it NEVER overlaps existing screens.** Run this BEFORE building anything else:
+\\\`\\\`\\\`javascript
+const children = figma.currentPage.children;
+let maxX = 0;
+children.forEach(c => {
+  if ('x' in c && 'width' in c) maxX = Math.max(maxX, c.x + c.width);
+});
+newFrame.x = maxX + 100;
+newFrame.y = 0;
+\\\`\\\`\\\`
+- Start with the phone frame **(matching existing screen dimensions)**
+- Add status bar (time "9:41", signal, wifi, battery)
+- Build each section completely before moving to the next
+- Import EVERY icon from the library
+- **Use ONLY values from the design system** — never invent spacing, colors, or font sizes
+- **Always use auto-layout** for frames with multiple children
+- **Set lineHeight explicitly** on every text node
+
+**Typography implementation (MANDATORY):**
+\`\`\`javascript
+await figma.loadFontAsync({ family: "Inter", style: "Bold" });
+text.fontName = { family: "Inter", style: "Bold" };
+text.fontSize = 28;
+text.lineHeight = { value: 36, unit: "PIXELS" };
+text.letterSpacing = { value: -0.3, unit: "PIXELS" };
+text.fills = [{ type: 'SOLID', color: { r: 0.07, g: 0.07, b: 0.09 } }]; // Text Primary
+\`\`\`
+
+### STEPS 4-7 — QUALITY LOOP (MANDATORY — REPEAT UNTIL PASSING)
+
+This is an iterative cycle. You MUST complete all steps, and if issues are found, loop back and fix them.
+
+**STEP 4 — SCREENSHOT AND COMPARE**
+Take a screenshot with figma_screenshot and visually check:
+- Does every element from Step 1 exist?
+- Is the visual hierarchy clear? (Can you instantly identify the focal point?)
+- Are spacing values consistent and on the 8px grid?
+- Do all text elements use sizes from the type scale?
+- Is there enough white space? (If the design feels cramped, it IS cramped)
+- **Is the screen the same size as other screens on the page?**
+- **Does the screen overlap any existing screens?** If yes, reposition it immediately.
+
+**STEP 5 — FIX MISSING DETAILS**
+Fix anything found in Step 4. Common things that get missed:
+- Status bar icons (signal, wifi, battery)
+- Bottom home indicator bar
+- Active state indicators (pills, highlights)
+- Blur/frosted glass effects
+- Proper shadow and elevation
+- Correct border-radius values
+- Insufficient spacing between sections
+- Screen overlapping other screens (reposition with maxX + 100)
+
+**STEP 6 — RUN VALIDATION (MANDATORY — NOT OPTIONAL)**
+Read \`${path.join(PACKAGE_ROOT, 'validate.js')}\` and execute it via figma_execute on the screen you built.
+It checks: spacing grid, auto-layout, typography scale, font size/weight counts, lineHeight, purple detection, touch targets, button heights.
+Returns a score (0-100) and a list of specific errors/warnings.
+
+**If score < 80: You MUST fix every error listed, then go back to STEP 4 (screenshot again) and repeat the loop.**
+Do NOT proceed to Step 7 until validation score is 80+.
+
+**STEP 7 — FINAL VERIFICATION SCREENSHOT (NEVER SKIP)**
+Take one final screenshot and verify:
+- Screen size matches existing screens
+- Visual hierarchy is clear (3-4 distinct levels)
+- Spacing is consistent and generous
+- Colors are from the approved palette only
+- Typography uses the type scale only
+- All sections are inside named Frames
+- No orphaned elements
+- **No screens overlap each other**
+If ANY issue is found, fix it, take another screenshot, and verify again. Max 3 iterations.
+**NEVER say "done" without a final verification screenshot showing the completed design.**
+
+---
+
+## DESIGN INTELLIGENCE — KEY RULES (Inline for immediate access)
+
+### Typography (80% of Design Quality)
+- **Type scale**: 32, 28, 22, 18, 16, 14, 12, 11px ONLY — never invent sizes
+- **Always set lineHeight**: heading = size * 1.25, body = size * 1.5
+- **Always set letterSpacing**: negative for headings (>20px), positive for small text (<12px)
+- **Max 3 weights**: 700 (bold), 500/600 (medium), 400 (regular)
+- **Never below 12px** on mobile
+- **De-emphasize with color, not size** — secondary text stays 14px but uses lighter color
+
+### Color (60-30-10 Rule)
+- **60% neutral** (white/near-white), **30% secondary** (borders, subtle fills), **10% accent**
+- **Light mode text**: Primary \`{r:0.07, g:0.07, b:0.09}\`, Secondary \`{r:0.4, g:0.4, b:0.44}\`, Tertiary \`{r:0.6, g:0.6, b:0.63}\`
+- **Dark mode text**: Primary \`{r:1, g:1, b:1}\`, Secondary \`{r:0.6, g:0.6, b:0.63}\`
+- **Default button**: Black \`{r:0.1, g:0.1, b:0.1}\` with white text
+- **NEVER**: purple/pink gradients, pure black #000 for text, more than 3 hues, rainbow accents
+
+### Spacing (8px Grid — Hard Constraint)
+- **Allowed values ONLY**: 4, 8, 12, 16, 20, 24, 32, 48, 64px
+- **NEVER**: 10, 15, 18, 25, 30px or any off-grid value
+- **Screen padding**: 16 or 20px horizontal, consistent across all screens
+- **Card padding**: 16, 20, or 24px — same for all cards on a screen
+- **Between sections**: 32-48px
+- **Related items get LESS space** than unrelated items (Gestalt proximity)
+
+### Hierarchy (Every Screen Needs This)
+- **ONE focal point per screen** — if everything is equal, the design fails
+- **3-4 hierarchy levels**: Hero (biggest/boldest) → Supporting → Content → Meta
+- **Section title closer to its content below** than to content above (top margin = 2x bottom)
+
+### Anti-Patterns (NEVER DO)
+- Absolute positioning when auto-layout works
+- More than 5 font sizes on one screen
+- Random spacing values not on the 8px grid
+- Purple/pink gradient buttons
+- Flat hierarchy (everything same size/weight)
+- Center-aligning body text longer than 3 lines
+- Missing lineHeight on text nodes
+- Oversized shadows (subtle = professional)
+
+---
+
+## FIGMA API REFERENCE
+
+### SCREEN FRAME RULES (CRITICAL)
+Phone screen frames must NEVER have:
+- \`cornerRadius\` — always set to \`0\`
+- \`strokes\` — never add strokes to screen frames
+- \`effects\` — NEVER add shadows or blur to the outermost screen frame
+
+\`\`\`javascript
+const screen = figma.createFrame();
+screen.name = "Screen Name";
+screen.resize(393, 852);
+screen.cornerRadius = 0;
+screen.effects = [];
+screen.fills = [{ type: 'SOLID', color: { r: 1, g: 1, b: 1 } }];
+screen.clipsContent = true;
+\`\`\`
+
+### TAB BAR / NAVIGATION BAR RULES (CRITICAL)
+\`\`\`javascript
+const tabBar = figma.createFrame();
+tabBar.name = "Tab Bar";
+tabBar.resize(screenWidth, 83); // 49px bar + 34px home indicator
+tabBar.layoutMode = 'VERTICAL';
+tabBar.primaryAxisAlignItems = 'CENTER';
+tabBar.counterAxisAlignItems = 'CENTER';
+tabBar.fills = [{ type: 'SOLID', color: { r: 1, g: 1, b: 1 } }];
+
+const iconRow = figma.createFrame();
+iconRow.name = "Tab Icons";
+iconRow.layoutMode = 'HORIZONTAL';
+iconRow.resize(screenWidth, 49);
+iconRow.counterAxisAlignItems = 'CENTER';
+iconRow.primaryAxisAlignItems = 'SPACE_BETWEEN';
+iconRow.paddingLeft = iconRow.paddingRight = 32;
+iconRow.fills = [];
+\`\`\`
+
+**Tab bar rules:**
+- MUST be full screen width
+- Use \`SPACE_BETWEEN\` to spread icons evenly
+- Each icon touch target: at least 44x44px
+
+### BUTTON RULES
+- Minimum height: 48px, minimum width: 120px for text buttons
+- Buttons must fit WITHIN their parent frame
+- Use \`layoutSizingHorizontal = 'FILL'\` for full-width buttons
+- Default color: **black** \`{r:0.1, g:0.1, b:0.1}\` with white text
+- NEVER default to purple, pink, or gradient
+
+### ELEMENT OVERFLOW
+\`\`\`javascript
+// Use auto-layout to prevent overflow
+// Prefer layoutSizingHorizontal = 'FILL' over fixed widths
+\`\`\`
+
+### LAYER STRUCTURE (MANDATORY)
+Every screen must have a clean hierarchy. NEVER leave loose elements as direct children.
+\`\`\`
+Screen Frame
+├── Status Bar (Frame)
+├── Header (Frame)
+├── Content Sections (Frame each)
+│   ├── Section Title
+│   └── Section Content
+├── Tab Bar (Frame)
+└── Home Indicator
+\`\`\`
+
+### COMPONENT PLACEMENT
+Before creating ANY element:
+1. Check if a parent Frame exists
+2. If not, create one first
+3. Place all elements INSIDE containers
+
+### SCREEN PLACEMENT — NEVER OVERLAP (CRITICAL)
+**Every new screen frame MUST be placed to the right of ALL existing frames with a 100px gap.**
+This is NON-NEGOTIABLE. Overlapping screens is one of the most common and most disruptive mistakes.
+You MUST run this code IMMEDIATELY after creating a new screen frame, BEFORE adding any children:
+\`\`\`javascript
+const children = figma.currentPage.children;
+let maxX = 0;
+children.forEach(c => {
+  if ('x' in c && 'width' in c) maxX = Math.max(maxX, c.x + c.width);
+});
+newFrame.x = maxX + 100;
+newFrame.y = 0;
+\`\`\`
+**Verify after completion:** In Step 7, confirm no screens overlap by checking that each frame's x position is >= previous frame's (x + width).
+
+### EFFECTS — EXACT SYNTAX
+
+**Drop Shadow** (all properties required):
+\`\`\`javascript
+node.effects = [
+  {
+    type: "DROP_SHADOW",
+    color: { r: 0, g: 0, b: 0, a: 0.12 },
+    offset: { x: 0, y: 4 },
+    radius: 16,
+    spread: -2,
+    visible: true,
+    blendMode: "NORMAL",
+    showShadowBehindNode: false
+  },
+  {
+    type: "DROP_SHADOW",
+    color: { r: 0, g: 0, b: 0, a: 0.06 },
+    offset: { x: 0, y: 1 },
+    radius: 4,
+    spread: 0,
+    visible: true,
+    blendMode: "NORMAL",
+    showShadowBehindNode: false
+  }
+];
+\`\`\`
+
+**Shadow rules:**
+- Set \`showShadowBehindNode: false\` when parent has \`clipsContent: true\`
+- Never use alpha below \`0.06\` — invisible
+- Use TWO shadows: ambient (soft) + contact (tight)
+- Keep shadows SUBTLE — professional designs hint at elevation, not scream it
+
+**Frosted Glass / Glassmorphism:**
+\`\`\`javascript
+const glass = figma.createFrame(); // MUST be a Frame, not Rectangle
+glass.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 }, opacity: 0.4 }];
+glass.effects = [
+  { type: "BACKGROUND_BLUR", radius: 40, visible: true },
+  { type: "DROP_SHADOW", color: { r: 0, g: 0, b: 0, a: 0.08 }, offset: { x: 0, y: 2 }, radius: 8, spread: 0, visible: true, blendMode: "NORMAL" }
+];
+glass.cornerRadius = 16;
+glass.clipsContent = true;
+\`\`\`
+
+**Blur rules:**
+- BACKGROUND_BLUR only works on Frames, not Rectangles
+- Fill MUST have opacity < 1.0 for blur to show through
+- Must be layered OVER other content
+
+**Inner Shadow:**
+\`\`\`javascript
+node.effects = [{
+  type: "INNER_SHADOW", color: { r: 0, g: 0, b: 0, a: 0.15 },
+  offset: { x: 0, y: 2 }, radius: 4, spread: 0, visible: true, blendMode: "NORMAL"
+}];
+\`\`\`
+
+**Common effect mistakes:**
+- Forgetting \`blendMode: "NORMAL"\` → shadow fails silently
+- Forgetting \`visible: true\` → effect hidden
+- Opaque fill with BACKGROUND_BLUR → blur invisible
+- Color values 0-255 instead of 0-1
+- BACKGROUND_BLUR on Rectangle → won't render
+
+### AUTO-LAYOUT (ALWAYS USE)
+\`\`\`javascript
+frame.layoutMode = 'VERTICAL';
+frame.primaryAxisAlignItems = 'CENTER';
+frame.counterAxisAlignItems = 'CENTER';
+frame.itemSpacing = 16; // MUST be from spacing scale
+frame.paddingTop = frame.paddingBottom = frame.paddingLeft = frame.paddingRight = 24;
+\`\`\`
+
+### COLOR FORMAT
+\`\`\`javascript
+node.fills = [{ type: 'SOLID', color: { r: 0.1, g: 0.1, b: 0.1 } }]; // Values 0-1, not 0-255
+\`\`\`
+
+---
+
+Remember: Your job is not done until you've run validation and visually verified the result looks correct.
+A professionally designed screen has: consistent spacing on the 8px grid, clear 3-4 level hierarchy, limited color palette, and generous white space.`;
+const server = new Server({ name: 'flaude-mcp', version: '2.0.0' }, {
+    capabilities: { tools: {} },
+    instructions: SERVER_INSTRUCTIONS,
+});
 const TOOLS = [
-    // READ TOOLS
     {
-        name: 'get_file_structure',
-        description: 'Get the structure of the current Figma file - all pages and top-level frames',
+        name: 'figma_execute',
+        description: `Execute JavaScript code in the Figma plugin context with full access to the \`figma\` API.
+The code runs as an async function, so you can use \`await\`. Return a value to get it back.
+
+Examples:
+- Search nodes: \`return figma.currentPage.findAll(n => n.name.includes("Button")).map(n => ({id: n.id, name: n.name, type: n.type}))\`
+- Get node details: \`const n = figma.getNodeById("1:23"); return {name: n.name, width: n.width, height: n.height, type: n.type}\`
+- Create frame: \`const f = figma.createFrame(); f.resize(400, 300); f.name = "Card"; return {id: f.id}\`
+- Modify node: \`const n = figma.getNodeById("1:23"); n.fills = [{type: "SOLID", color: {r: 1, g: 0, b: 0}}]; return "done"\`
+- Add effects: \`const n = figma.getNodeById("1:23"); n.effects = [{type: "DROP_SHADOW", offset: {x:0,y:4}, radius: 8, color: {r:0,g:0,b:0,a:0.25}, visible: true, blendMode: "NORMAL", spread: 0}]; return "done"\`
+
+IMPORTANT: Always return plain serializable data (strings, numbers, arrays, objects). Never return Figma node objects directly.`,
+        inputSchema: {
+            type: 'object',
+            properties: {
+                code: {
+                    type: 'string',
+                    description: 'JavaScript code to execute. Has access to `figma` global. Async context (await works). Return a value to get results.',
+                },
+            },
+            required: ['code'],
+        },
+    },
+    {
+        name: 'figma_screenshot',
+        description: 'Capture a screenshot of a specific node or the current selection as a base64 PNG. Use to visually verify changes.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                nodeId: { type: 'string', description: 'Node ID to screenshot. If omitted, captures the current selection.' },
+                scale: { type: 'number', description: 'Export scale (default: 1). Use 2 for retina.' },
+            },
+        },
+    },
+    {
+        name: 'figma_status',
+        description: 'Check connection status, current page, selection, and document info.',
         inputSchema: {
             type: 'object',
             properties: {},
-            required: [],
         },
     },
     {
-        name: 'get_selection',
-        description: 'Get details about the currently selected nodes in Figma',
-        inputSchema: {
-            type: 'object',
-            properties: {},
-            required: [],
-        },
-    },
-    {
-        name: 'get_node_details',
-        description: 'Get detailed information about a specific node including: dimensions, position, text properties (alignment, auto-resize, overflow warnings), auto-layout info (mode, spacing, padding), fill types, and constraints. Enhanced to help detect layout issues.',
+        name: 'figma_navigate',
+        description: 'Navigate to a specific node or page. Scrolls and zooms the viewport.',
         inputSchema: {
             type: 'object',
             properties: {
-                nodeId: { type: 'string', description: 'The Figma node ID' },
+                nodeId: { type: 'string', description: 'Node ID to navigate to and zoom into view.' },
+                pageId: { type: 'string', description: 'Page ID to switch to.' },
+                pageName: { type: 'string', description: 'Page name to switch to (alternative to pageId).' },
             },
-            required: ['nodeId'],
-        },
-    },
-    {
-        name: 'search_nodes',
-        description: 'Search for nodes by name pattern',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                pattern: { type: 'string', description: 'Name pattern to search for (case insensitive)' },
-                nodeType: { type: 'string', description: 'Optional: filter by node type (FRAME, TEXT, COMPONENT, etc.)' },
-            },
-            required: ['pattern'],
-        },
-    },
-    // DEEP ANALYSIS TOOLS
-    {
-        name: 'get_all_text_nodes',
-        description: 'Get ALL text nodes within a frame (deep recursive scan). Returns every text node with path, content, font info, alignment, and overflow detection. Use this to ensure you never miss nested text in groups or components.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                nodeId: { type: 'string', description: 'ID of the frame/group to scan for text nodes' },
-            },
-            required: ['nodeId'],
-        },
-    },
-    {
-        name: 'export_frame_preview',
-        description: 'Export a frame as a base64 PNG image to visually verify changes. Use this after making modifications to "see" the result.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                nodeId: { type: 'string', description: 'ID of the frame to export' },
-                scale: { type: 'number', description: 'Export scale (0.5 = 50%, 1 = 100%, 2 = 200%). Default: 0.5 for smaller size' },
-                format: { type: 'string', enum: ['PNG', 'JPG', 'SVG'], description: 'Export format. Default: PNG' },
-            },
-            required: ['nodeId'],
-        },
-    },
-    {
-        name: 'check_layout_consistency',
-        description: 'Analyze spacing, alignment, and layout patterns within a frame. Detects inconsistent spacing, misaligned elements, and suggests using auto-layout. Use this before and after making changes to ensure visual coherence.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                nodeId: { type: 'string', description: 'ID of the frame to analyze' },
-            },
-            required: ['nodeId'],
-        },
-    },
-    // URL & HTML IMPORT TOOLS
-    {
-        name: 'import_url',
-        description: 'Fetch a website and convert it to Figma layers. Extracts the HTML from the URL, simplifies it, and creates native Figma frames. Great for copying existing website designs.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                url: { type: 'string', description: 'The website URL to import (e.g., "https://example.com")' },
-                selector: { type: 'string', description: 'Optional: CSS selector to extract specific section (e.g., ".hero", "#header")' },
-                x: { type: 'number', description: 'X position on canvas' },
-                y: { type: 'number', description: 'Y position on canvas' },
-                name: { type: 'string', description: 'Name for the imported frame' },
-            },
-            required: ['url'],
-        },
-    },
-    {
-        name: 'import_html',
-        description: 'Convert HTML/CSS to native Figma layers. Use this to rapidly generate designs by writing HTML (which Claude excels at) and having it automatically converted to editable Figma frames with proper auto-layout, text nodes, and styling. Supports flexbox, common CSS properties, and semantic HTML tags.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                html: {
-                    type: 'string',
-                    description: 'HTML string with inline styles. Use semantic tags (div, p, h1-h6, button, input, img) and inline CSS styles for layout (display:flex, gap, padding) and visuals (background-color, color, border-radius).'
-                },
-                parentId: { type: 'string', description: 'Optional: ID of parent frame to insert into' },
-                x: { type: 'number', description: 'X position on canvas (default: 0)' },
-                y: { type: 'number', description: 'Y position on canvas (default: 0)' },
-                name: { type: 'string', description: 'Name for the root frame' },
-            },
-            required: ['html'],
-        },
-    },
-    // DESIGN LEARNING TOOLS
-    {
-        name: 'study_frame',
-        description: 'Analyze a "gold standard" frame to learn its design patterns. Returns spacing rules, text styles with max widths, color palette, component patterns, and recommendations. Use this BEFORE designing to understand the existing style. Point it at 2-3 of the best-designed screens.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                nodeId: { type: 'string', description: 'ID of the frame to study (should be a well-designed reference screen)' },
-            },
-            required: ['nodeId'],
-        },
-    },
-    {
-        name: 'audit_components',
-        description: 'Catalog all unique UI patterns across the entire page. Returns categorized components (buttons, cards, inputs, badges), text styles, color palette, and spacing system. Use this to understand the full design system before making changes.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                pageId: { type: 'string', description: 'Optional: specific page ID (defaults to current page)' },
-                includeInstances: { type: 'boolean', description: 'Whether to include component instances (default: true)' },
-            },
-            required: [],
-        },
-    },
-    {
-        name: 'get_text_constraints',
-        description: 'Get maximum text widths for each font size in the file. Prevents text overflow by knowing exact container limits. Returns constraints grouped by text category (hero, heading, body, caption).',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                nodeId: { type: 'string', description: 'Optional: specific frame to analyze (defaults to entire page)' },
-            },
-            required: [],
-        },
-    },
-    {
-        name: 'prepare_to_design',
-        description: 'PRE-FLIGHT CHECK: Run this BEFORE any design work. Analyzes the file to learn spacing rules, text constraints, and color palette. Returns a design brief you MUST follow. This is the single most important tool for preventing layout mistakes.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                referenceFrameId: { type: 'string', description: 'Optional: ID of a well-designed reference frame to learn from' },
-                pageId: { type: 'string', description: 'Optional: specific page to analyze' },
-            },
-            required: [],
-        },
-    },
-    // WRITE TOOLS
-    {
-        name: 'create_frame',
-        description: 'Create a new frame in Figma',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                name: { type: 'string', description: 'Name of the frame' },
-                parentId: { type: 'string', description: 'ID of parent node (optional, defaults to current page)' },
-                x: { type: 'number', description: 'X position' },
-                y: { type: 'number', description: 'Y position' },
-                width: { type: 'number', description: 'Width of frame' },
-                height: { type: 'number', description: 'Height of frame' },
-                fillColor: {
-                    type: 'object',
-                    description: 'Background color as {r, g, b} values 0-1',
-                    properties: {
-                        r: { type: 'number' },
-                        g: { type: 'number' },
-                        b: { type: 'number' },
-                    },
-                },
-            },
-            required: ['name', 'width', 'height'],
-        },
-    },
-    {
-        name: 'create_text',
-        description: 'Create a text node in Figma with custom font support. AUTO-CHECKS: Returns warnings if text overflows parent container or is too long without wrapping.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                content: { type: 'string', description: 'The text content' },
-                parentId: { type: 'string', description: 'ID of parent frame' },
-                x: { type: 'number', description: 'X position within parent' },
-                y: { type: 'number', description: 'Y position within parent' },
-                fontSize: { type: 'number', description: 'Font size in pixels' },
-                fontFamily: { type: 'string', description: 'Font family name (e.g., "Inter", "Roboto", "Canela Deck Trial")' },
-                fontStyle: { type: 'string', description: 'Font style (e.g., "Regular", "Bold", "Thin", "Medium")' },
-                fontWeight: { type: 'string', description: 'Legacy: Font weight, use fontStyle instead' },
-                width: { type: 'number', description: 'Fixed width for text box. When set, text will wrap to this width.' },
-                textAutoResize: { type: 'string', enum: ['WIDTH_AND_HEIGHT', 'HEIGHT', 'NONE', 'TRUNCATE'], description: 'Text resize mode. HEIGHT enables text wrapping with fixed width.' },
-                maxWidth: { type: 'number', description: 'Optional: max width constraint (triggers warning if exceeded)' },
-                fillColor: {
-                    type: 'object',
-                    description: 'Text color as {r, g, b} values 0-1',
-                    properties: {
-                        r: { type: 'number' },
-                        g: { type: 'number' },
-                        b: { type: 'number' },
-                    },
-                },
-            },
-            required: ['content', 'parentId'],
-        },
-    },
-    {
-        name: 'create_rectangle',
-        description: 'Create a rectangle shape, optionally copying fills (including images) from another node',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                parentId: { type: 'string', description: 'ID of parent frame' },
-                x: { type: 'number' },
-                y: { type: 'number' },
-                width: { type: 'number' },
-                height: { type: 'number' },
-                cornerRadius: { type: 'number', description: 'Corner radius for rounded rectangles' },
-                fillColor: {
-                    type: 'object',
-                    properties: { r: { type: 'number' }, g: { type: 'number' }, b: { type: 'number' } },
-                },
-                copyFillsFrom: { type: 'string', description: 'Node ID to copy fills from (preserves image fills)' },
-            },
-            required: ['parentId', 'width', 'height'],
-        },
-    },
-    {
-        name: 'duplicate_node',
-        description: 'Duplicate an existing node, optionally to a different parent',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                nodeId: { type: 'string', description: 'ID of node to duplicate' },
-                newName: { type: 'string', description: 'Name for the duplicated node' },
-                offsetX: { type: 'number', description: 'X offset from original' },
-                offsetY: { type: 'number', description: 'Y offset from original' },
-                targetParentId: { type: 'string', description: 'ID of parent to move the duplicate to (optional)' },
-            },
-            required: ['nodeId'],
-        },
-    },
-    {
-        name: 'move_node',
-        description: 'Move a node to a different parent frame',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                nodeId: { type: 'string', description: 'ID of node to move' },
-                targetParentId: { type: 'string', description: 'ID of the new parent frame' },
-                x: { type: 'number', description: 'New X position within parent' },
-                y: { type: 'number', description: 'New Y position within parent' },
-            },
-            required: ['nodeId', 'targetParentId'],
-        },
-    },
-    {
-        name: 'modify_node',
-        description: 'Modify properties of an existing node',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                nodeId: { type: 'string', description: 'ID of node to modify' },
-                properties: {
-                    type: 'object',
-                    description: 'Properties to change (name, x, y, width, height, visible, opacity, etc.)',
-                },
-            },
-            required: ['nodeId', 'properties'],
-        },
-    },
-    {
-        name: 'resize_node',
-        description: 'Resize a node using Figma\'s resize() method. Use this to change dimensions of frames, rectangles, groups, and other resizable nodes. This is the proper way to resize nodes (instead of setting width/height properties directly).',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                nodeId: { type: 'string', description: 'ID of node to resize' },
-                width: { type: 'number', description: 'New width (optional, keeps original if not specified)' },
-                height: { type: 'number', description: 'New height (optional, keeps original if not specified)' },
-            },
-            required: ['nodeId'],
-        },
-    },
-    {
-        name: 'update_text',
-        description: 'Update the content, font, or style of a text node. AUTO-CHECKS: Returns dimension changes and warnings if text grows beyond container bounds or may overflow. SINGLE-LINE PRESERVATION: By default, if text was originally single-line and new content would cause wrapping, the text will automatically expand its width instead of wrapping (set preserveSingleLine: false to disable).',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                nodeId: { type: 'string', description: 'ID of text node' },
-                content: { type: 'string', description: 'New text content' },
-                fontSize: { type: 'number' },
-                fontFamily: { type: 'string', description: 'Font family name (e.g., "Inter", "Roboto")' },
-                fontStyle: { type: 'string', description: 'Font style (e.g., "Regular", "Bold", "Thin")' },
-                fontWeight: { type: 'string', description: 'Legacy: use fontStyle instead' },
-                width: { type: 'number', description: 'Set a new fixed width for text box. Text will wrap to this width.' },
-                textAutoResize: { type: 'string', enum: ['WIDTH_AND_HEIGHT', 'HEIGHT', 'NONE', 'TRUNCATE'], description: 'Text resize mode. Use HEIGHT with width for wrapping, WIDTH_AND_HEIGHT to auto-fit content.' },
-                preserveSingleLine: { type: 'boolean', description: 'If true (default), single-line text will expand its width instead of wrapping when content is added. Set to false to allow wrapping.' },
-                fillColor: {
-                    type: 'object',
-                    properties: { r: { type: 'number' }, g: { type: 'number' }, b: { type: 'number' } },
-                },
-            },
-            required: ['nodeId'],
-        },
-    },
-    {
-        name: 'delete_node',
-        description: 'Delete a node from the Figma file',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                nodeId: { type: 'string', description: 'ID of node to delete' },
-            },
-            required: ['nodeId'],
-        },
-    },
-    {
-        name: 'group_nodes',
-        description: 'Group multiple nodes together',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                nodeIds: {
-                    type: 'array',
-                    items: { type: 'string' },
-                    description: 'IDs of nodes to group'
-                },
-                groupName: { type: 'string', description: 'Name for the group' },
-            },
-            required: ['nodeIds'],
-        },
-    },
-    // SCHEMA-AWARE TOOLS (Generic - works with any app schema)
-    {
-        name: 'create_screen_from_state',
-        description: 'Create a complete screen based on a state definition from your app schema',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                stateName: {
-                    type: 'string',
-                    description: 'State name from schema (defined in your app-schema.json)'
-                },
-                screenType: {
-                    type: 'string',
-                    description: 'Which screen type in schema (e.g., "home_screen", "onboarding", "settings")'
-                },
-                baseFrameId: {
-                    type: 'string',
-                    description: 'ID of existing frame to use as template (will duplicate and modify)'
-                },
-                position: {
-                    type: 'object',
-                    properties: { x: { type: 'number' }, y: { type: 'number' } },
-                    description: 'Position for the new frame',
-                },
-            },
-            required: ['stateName'],
-        },
-    },
-    {
-        name: 'validate_against_schema',
-        description: 'Check if current Figma file has all screens/states defined in your app schema',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                schemaSection: {
-                    type: 'string',
-                    description: 'Which part of schema to validate (e.g., "states", "flows", "components")'
-                },
-            },
-            required: [],
-        },
-    },
-    {
-        name: 'get_schema',
-        description: 'Get the loaded app schema to understand your design system, states, flows, and components',
-        inputSchema: {
-            type: 'object',
-            properties: {},
-            required: [],
-        },
-    },
-    {
-        name: 'create_flow',
-        description: 'Create all screens for a flow defined in your schema',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                flowName: {
-                    type: 'string',
-                    description: 'Name of flow from schema (e.g., "onboarding", "checkout", "signup")'
-                },
-                startPosition: {
-                    type: 'object',
-                    properties: { x: { type: 'number' }, y: { type: 'number' } },
-                },
-                spacing: {
-                    type: 'number',
-                    description: 'Horizontal spacing between screens (default: 100)'
-                },
-            },
-            required: ['flowName'],
         },
     },
 ];
-// Create MCP Server
-const server = new Server({
-    name: 'figma-editor-mcp',
-    version: '1.0.0',
-}, {
-    capabilities: {
-        tools: {},
-        resources: {},
-    },
-});
-// Handle tool listing
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return { tools: TOOLS };
-});
-// Handle tool execution
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     try {
-        // Schema-only tools that don't need plugin
-        if (name === 'get_schema') {
-            const schema = loadSchema();
-            return {
-                content: [
-                    {
-                        type: 'text',
-                        text: schema
-                            ? JSON.stringify(schema, null, 2)
-                            : 'No schema loaded. Create unloop-schema.json in the MCP server directory.',
-                    },
-                ],
-            };
-        }
-        // URL import - fetch first, then send to plugin
-        if (name === 'import_url') {
-            const { url, selector, x, y, name: frameName } = args;
-            console.error(`[MCP] Fetching URL: ${url}`);
-            // Fetch the HTML
-            const rawHtml = await fetchURL(url);
-            console.error(`[MCP] Fetched ${rawHtml.length} bytes`);
-            // Simplify the HTML
-            let html = simplifyHTML(rawHtml);
-            console.error(`[MCP] Simplified to ${html.length} bytes`);
-            // If selector specified, try to extract that section
-            if (selector) {
-                // Simple extraction (works for id and class)
-                const idMatch = selector.match(/^#([\w-]+)$/);
-                const classMatch = selector.match(/^\.([\w-]+)$/);
-                if (idMatch) {
-                    const regex = new RegExp(`<[^>]+id=["']${idMatch[1]}["'][^>]*>[\\s\\S]*?<\\/`, 'i');
-                    const match = html.match(regex);
-                    if (match)
-                        html = match[0];
+        switch (name) {
+            case 'figma_execute': {
+                const { code } = args;
+                if (!code || typeof code !== 'string') {
+                    throw new Error('`code` parameter is required');
                 }
-                else if (classMatch) {
-                    const regex = new RegExp(`<[^>]+class=["'][^"']*${classMatch[1]}[^"']*["'][^>]*>[\\s\\S]*?<\\/`, 'i');
-                    const match = html.match(regex);
-                    if (match)
-                        html = match[0];
+                const result = await sendToPlugin('execute', { code });
+                return {
+                    content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result, null, 2) }],
+                };
+            }
+            case 'figma_screenshot': {
+                const { nodeId, scale } = (args || {});
+                const result = await sendToPlugin('screenshot', { nodeId, scale: scale || 1 });
+                if (result?.imageBase64) {
+                    return {
+                        content: [{
+                                type: 'image',
+                                data: result.imageBase64,
+                                mimeType: 'image/png',
+                            }],
+                    };
                 }
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
             }
-            // Limit HTML size to prevent plugin overload
-            if (html.length > 50000) {
-                html = html.substring(0, 50000);
-                console.error('[MCP] HTML truncated to 50KB');
+            case 'figma_status': {
+                const connected = connectedPlugin !== null && connectedPlugin.readyState === WebSocket.OPEN;
+                if (!connected) {
+                    return {
+                        content: [{ type: 'text', text: JSON.stringify({
+                                    connected: false,
+                                    authenticated: isAuthenticated,
+                                    email: authenticatedEmail,
+                                    message: 'Figma plugin not connected. Open the Flaude plugin in Figma and click Connect.',
+                                }, null, 2) }],
+                    };
+                }
+                const result = await sendToPlugin('get_status', {});
+                return {
+                    content: [{ type: 'text', text: JSON.stringify({
+                                connected: true,
+                                authenticated: isAuthenticated,
+                                email: authenticatedEmail,
+                                ...result,
+                            }, null, 2) }],
+                };
             }
-            // Send to plugin as import_html
-            const result = await sendToPlugin('import_html', {
-                html,
-                x: x || 0,
-                y: y || 0,
-                name: frameName || new URL(url).hostname,
-            });
-            return {
-                content: [
-                    {
-                        type: 'text',
-                        text: JSON.stringify({
-                            imported: true,
-                            url,
-                            ...result,
-                        }, null, 2),
-                    },
-                ],
-            };
+            case 'figma_navigate': {
+                const { nodeId, pageId, pageName } = (args || {});
+                const result = await sendToPlugin('navigate', { nodeId, pageId, pageName });
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+            }
+            default:
+                throw new Error(`Unknown tool: ${name}`);
         }
-        // All other tools require plugin connection
-        const result = await sendToPlugin(name, args);
-        return {
-            content: [
-                {
-                    type: 'text',
-                    text: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
-                },
-            ],
-        };
     }
     catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
         return {
-            content: [
-                {
-                    type: 'text',
-                    text: `Error: ${errorMessage}`,
-                },
-            ],
+            content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
             isError: true,
         };
     }
 });
-// Handle resource listing (schema as resource)
-server.setRequestHandler(ListResourcesRequestSchema, async () => {
-    const schema = loadSchema();
-    const appName = schema?.app_name || 'App';
-    return {
-        resources: schema
-            ? [
-                {
-                    uri: 'schema://app',
-                    name: `${appName} Schema`,
-                    description: `States, flows, components, and design tokens for ${appName}`,
-                    mimeType: 'application/json',
-                },
-            ]
-            : [],
-    };
-});
-server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-    if (request.params.uri === 'schema://app') {
-        const schema = loadSchema();
-        return {
-            contents: [
-                {
-                    uri: 'schema://app',
-                    mimeType: 'application/json',
-                    text: JSON.stringify(schema, null, 2),
-                },
-            ],
-        };
-    }
-    throw new Error(`Unknown resource: ${request.params.uri}`);
-});
 // Main
 async function main() {
-    // Start WebSocket server for plugin communication
-    startWebSocketServer();
-    // Start MCP server on stdio
+    await startWebSocketServer();
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error('[MCP] Figma Editor MCP server running');
-    console.error('[MCP] Waiting for Figma plugin connection on port', WS_PORT);
+    console.error('[MCP] Flaude MCP server running (v2 - 4 tools)');
+    if (isProxyMode) {
+        console.error('[MCP] Running in PROXY mode');
+    }
+    else {
+        console.error('[MCP] Running in SERVER mode - waiting for Figma plugin on port', WS_PORT);
+    }
 }
+// Graceful shutdown
+function shutdown() {
+    console.error('[MCP] Shutting down...');
+    for (const [id, pending] of pendingRequests) {
+        clearTimeout(pending.timeout);
+        pending.reject(new Error('Server shutting down'));
+        pendingRequests.delete(id);
+    }
+    if (connectedPlugin) {
+        connectedPlugin.close();
+        connectedPlugin = null;
+    }
+    process.exit(0);
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
 main().catch((error) => {
     console.error('[MCP] Fatal error:', error);
     process.exit(1);

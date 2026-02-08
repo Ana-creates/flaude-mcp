@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 /**
- * Figma Editor MCP Server
+ * Figma Editor MCP Server (v2 - Simplified)
  *
- * An MCP server that enables Claude to READ and WRITE to Figma files
- * through a WebSocket connection to a companion Figma plugin.
+ * 4 tools instead of 50+. All design operations go through figma_execute.
  *
  * Architecture:
- * Claude -> MCP Server -> WebSocket -> Figma Plugin -> Figma File
+ * Claude -> MCP Server (stdio) -> WebSocket (9876) -> Figma Plugin -> Figma File
  */
 export {};
