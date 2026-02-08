@@ -1,9 +1,36 @@
 {
-  "name": "figma-editor-mcp",
+  "name": "flaude-mcp",
   "version": "1.0.0",
-  "description": "MCP server that can read AND write to Figma via companion plugin",
+  "description": "MCP server for Flaude — lets Claude Code read and edit Figma files via the Flaude plugin",
+  "author": "Flaude",
+  "license": "MIT",
+  "homepage": "https://flaude.app",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/flaude/flaude-mcp"
+  },
+  "keywords": [
+    "mcp",
+    "figma",
+    "claude",
+    "ai",
+    "design",
+    "model-context-protocol",
+    "flaude"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "main": "dist/index.js",
   "type": "module",
+  "bin": {
+    "flaude-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "DESIGN_SYSTEM.md",
+    "validate.js"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",

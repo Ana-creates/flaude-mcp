@@ -2,6 +2,8 @@
 
 An MCP (Model Context Protocol) server that enables Claude to **read AND write** to Figma files. Works with any app - just define your schema.
 
+> **Pro Feature**: This MCP integration requires a [Flaude Pro](https://flaude.com/upgrade) subscription. Free users can use the Flaude plugin directly in Figma, but Claude Code integration is Pro-only.
+
 ## Architecture
 
 ```
@@ -45,12 +47,15 @@ Or use the CLI:
 claude mcp add figma-editor node /path/to/figma-editor-mcp/dist/index.js
 ```
 
-### 3. Open FigmaClaude Plugin in Figma
+### 3. Open Flaude Plugin in Figma
 
 1. Open your Figma file
-2. Run the FigmaClaude plugin
-3. Go to Settings → Connect to MCP Server
-4. Click "Connect"
+2. Run the Flaude plugin
+3. **Activate your Pro license** (Settings → Enter email + license key)
+4. Go to Settings → Claude Code section
+5. Click "Connect"
+
+> **Note**: The Connect button only appears for Pro users. Free users will see an upgrade prompt.
 
 ### 4. Start Using!
 

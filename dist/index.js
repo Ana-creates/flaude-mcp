@@ -2,7 +2,7 @@
 /**
  * Figma Editor MCP Server (v2 - Simplified)
  *
- * 4 tools instead of 50+. All design operations go through figma_execute.
+ * 8 tools instead of 50+. All design operations go through figma_execute.
  *
  * Architecture:
  * Claude -> MCP Server (stdio) -> WebSocket (9876) -> Figma Plugin -> Figma File
@@ -21,6 +21,7 @@ const PACKAGE_ROOT = path.resolve(__dirname, '..');
 const WS_PORT = 9876;
 const REQUEST_TIMEOUT = 30000;
 const DEV_MODE = false;
+const DESIGN_SYSTEMS_MCP_URL = 'https://design-systems-mcp.southleft.com/mcp';
 // State
 let connectedPlugin = null;
 let isProxyMode = false;
@@ -655,6 +656,59 @@ const server = new Server({ name: 'flaude-mcp', version: '2.0.0' }, {
     capabilities: { tools: {} },
     instructions: SERVER_INSTRUCTIONS,
 });
+// Proxy a tool call to the design-systems MCP server
+let designSystemsSessionId = null;
+async function callDesignSystemsTool(toolName, args) {
+    // Initialize session if needed
+    if (!designSystemsSessionId) {
+        const initRes = await fetch(DESIGN_SYSTEMS_MCP_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'flaude-mcp', version: '1.0.0' } }, id: 'init' }),
+            signal: AbortSignal.timeout(15000),
+        });
+        const sessionHeader = initRes.headers.get('mcp-session-id');
+        if (sessionHeader)
+            designSystemsSessionId = sessionHeader;
+        // Also send initialized notification
+        await fetch(DESIGN_SYSTEMS_MCP_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(designSystemsSessionId && { 'mcp-session-id': designSystemsSessionId }),
+            },
+            body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+            signal: AbortSignal.timeout(10000),
+        });
+    }
+    const res = await fetch(DESIGN_SYSTEMS_MCP_URL, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            ...(designSystemsSessionId && { 'mcp-session-id': designSystemsSessionId }),
+        },
+        body: JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'tools/call',
+            params: { name: toolName, arguments: args },
+            id: crypto.randomUUID(),
+        }),
+        signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) {
+        throw new Error(`Design systems API error: ${res.status}`);
+    }
+    const data = await res.json();
+    if (data.error) {
+        throw new Error(data.error.message || 'Design systems tool error');
+    }
+    // Extract text from MCP response
+    const content = data.result?.content;
+    if (Array.isArray(content)) {
+        return content.map((c) => c.text || '').join('\n');
+    }
+    return JSON.stringify(data.result, null, 2);
+}
 const TOOLS = [
     {
         name: 'figma_execute',
@@ -709,6 +763,60 @@ IMPORTANT: Always return plain serializable data (strings, numbers, arrays, obje
                 pageId: { type: 'string', description: 'Page ID to switch to.' },
                 pageName: { type: 'string', description: 'Page name to switch to (alternative to pageId).' },
             },
+        },
+    },
+    // Design Systems tools — proxied from design-systems-mcp.southleft.com
+    {
+        name: 'search_design_knowledge',
+        description: 'Search through design system knowledge base entries by query, category, or tags',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: 'Search query for finding relevant design system knowledge' },
+                category: {
+                    type: 'string',
+                    description: 'Filter by category',
+                    enum: ['figma', 'tokens', 'components', 'documentation', 'workflow', 'governance', 'accessibility', 'tools', 'case-studies', 'foundations'],
+                },
+                tags: { type: 'array', items: { type: 'string' }, description: 'Filter by specific tags' },
+                limit: { type: 'number', description: 'Maximum number of results to return (default: 15)' },
+            },
+            required: ['query'],
+        },
+    },
+    {
+        name: 'search_chunks',
+        description: 'Search through specific content chunks for detailed information',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: 'Search query for finding specific content chunks' },
+                limit: { type: 'number', description: 'Maximum number of chunks to return (default: 8)' },
+            },
+            required: ['query'],
+        },
+    },
+    {
+        name: 'browse_by_category',
+        description: 'Browse all entries in a specific category',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                category: {
+                    type: 'string',
+                    description: 'Category to browse',
+                    enum: ['figma', 'tokens', 'components', 'documentation', 'workflow', 'governance', 'accessibility', 'tools', 'case-studies', 'foundations'],
+                },
+            },
+            required: ['category'],
+        },
+    },
+    {
+        name: 'get_all_tags',
+        description: 'Get a list of all available tags in the knowledge base',
+        inputSchema: {
+            type: 'object',
+            properties: {},
         },
     },
 ];
@@ -768,6 +876,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 const result = await sendToPlugin('navigate', { nodeId, pageId, pageName });
                 return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
             }
+            // Design Systems tools — proxy to external MCP
+            case 'search_design_knowledge':
+            case 'search_chunks':
+            case 'browse_by_category':
+            case 'get_all_tags': {
+                const result = await callDesignSystemsTool(name, (args || {}));
+                return { content: [{ type: 'text', text: result }] };
+            }
             default:
                 throw new Error(`Unknown tool: ${name}`);
         }
@@ -784,7 +900,7 @@ async function main() {
     await startWebSocketServer();
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error('[MCP] Flaude MCP server running (v2 - 4 tools)');
+    console.error('[MCP] Flaude MCP server running (v2 - 8 tools)');
     if (isProxyMode) {
         console.error('[MCP] Running in PROXY mode');
     }
