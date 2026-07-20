@@ -957,6 +957,15 @@ b.resize(b.width, 52);  b.cornerRadius = 26;
 - Reuse icons from the components library — never hand-draw an icon that exists.
 - Image tiles (artists, albums, avatars) must contain REAL sourced photos, never
   a flat colored circle.
+- **Brand logos, wordmarks, and mascots MUST be sourced as real images** — fetch
+  the actual asset by URL and load it via `figma.createImageAsync(url)`, then paint
+  it as an image fill. NEVER reconstruct a brand mark, logo, or mascot (e.g. the
+  Duolingo owl, the Spotify logo) from primitive shapes (`createEllipse`,
+  `createVector`, `createStar`, `createPolygon`). If the real asset cannot be
+  fetched, STOP and report it — do not hand-draw an approximation. Sourcing order:
+  official brand CDN / press-kit → Wikimedia / SimpleIcons → the Refero screen
+  thumbnail as a last resort. A logo or mascot assembled from >2 vector primitives
+  is a rule violation and must fail the screen.
 
 ### 16.5 GATE — verify with numbers before declaring a screen done
 Run this assertion via figma_execute. If it returns pass:false, fix the listed
