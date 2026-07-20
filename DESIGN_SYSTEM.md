@@ -894,3 +894,87 @@ function validateDesign(screenNode) {
 - **Target: 80+ for acceptable, 90+ for good, 95+ for excellent**
 
 **If score < 80, you MUST fix errors before presenting the design. No exceptions.**
+
+---
+
+## 16. RECREATION FIDELITY (rebuilding a real screen/flow from a reference)
+
+When you are REPRODUCING an existing screen (e.g. copying a real app screen or
+flow into Figma from a reference image), pixel-perfect + cross-screen consistency
+is the bar. These are hard rules — violating any is a defect.
+
+### 16.1 FLOW KIT FIRST — build masters, assemble from INSTANCES
+Do NOT build each screen of a flow independently (that is why shared elements
+drift). First create ONE master COMPONENT for every recurring element (status
+bar, nav header, back button, input field, primary button). Then build each
+screen by placing INSTANCES of those masters plus screen-specific content.
+Figma enforces that an instance matches its master's size/style — so shared
+elements CANNOT drift. This is structural, not a suggestion.
+
+### 16.2 COMPUTE positions with MATH — never eyeball a screenshot
+Screenshot-estimated coordinates are the #1 source of cross-screen drift.
+Read the real node coordinates via figma_execute and COMPUTE placement:
+
+```javascript
+// Anchor a caption/helper text exactly below an input (same gap every screen):
+const input = figma.getNodeById(inputId);
+caption.y = Math.round(input.y + input.height + GAP);   // e.g. GAP = 10
+caption.x = Math.round(input.x);
+
+// Center a dialog/notification by arithmetic (390-wide frame):
+node.x = Math.round((390 - node.width) / 2);
+node.y = Math.round((844 - node.height) / 2);
+```
+
+Verify by READING BACK node.x/node.y numerically — never by judging a picture.
+Use screenshots only for a final visual sanity check, never as the coordinate
+source.
+
+### 16.3 Buttons HUG their content — never a fixed width
+A 'Next'/'Continue'/'Create account' button is a HUG-CONTENT auto-layout pill:
+width = label + fixed horizontal padding, with a fixed height + radius. So
+'Next' is narrow and 'Create account' is wider — that is CORRECT. Forcing a fixed
+width looks wrong vs. the reference. Build it once, reuse the SAME spec everywhere:
+
+```javascript
+const b = figma.getNodeById(buttonId);   // a FRAME containing the label text
+b.layoutMode = 'HORIZONTAL';
+b.primaryAxisSizingMode = 'AUTO';    // width hugs the label
+b.counterAxisSizingMode = 'FIXED';   // fixed height
+b.primaryAxisAlignItems = 'CENTER';
+b.counterAxisAlignItems = 'CENTER';
+b.paddingLeft = b.paddingRight = 32;  b.paddingTop = b.paddingBottom = 0;
+b.resize(b.width, 52);  b.cornerRadius = 26;
+// then center it: b.x = Math.round((390 - b.width) / 2);
+```
+
+### 16.4 Shared TEXT STYLES, reused native assets, real images
+- Typography is one shared spec per role (headline/body/caption): same family,
+  size, weight, line-height on EVERY screen. Never let a headline be 26px on one
+  screen and 40px on the next.
+- Reuse native platform assets (keyboard, status bar, pickers, permission
+  dialogs) — never hand-build a keyboard from 30+ key rectangles.
+- Reuse icons from the components library — never hand-draw an icon that exists.
+- Image tiles (artists, albums, avatars) must contain REAL sourced photos, never
+  a flat colored circle.
+
+### 16.5 GATE — verify with numbers before declaring a screen done
+Run this assertion via figma_execute. If it returns pass:false, fix the listed
+failures and re-run until pass:true. Correctness is decided by MATH, not by how
+the screenshot looks.
+
+```javascript
+function verifyLayout(assertions) {
+  const R = (id) => figma.getNodeById(id);
+  const out = []; let passed = 0;
+  for (const a of assertions) {
+    const n = R(a.nodeId); const tol = a.tolerance ?? 1; let ok = false, d = {};
+    if (a.type === 'equals')   { const v = n[a.prop]; ok = Math.abs(v - a.value) <= tol; d = { prop:a.prop, expected:a.value, actual:Math.round(v) }; }
+    if (a.type === 'centeredX'){ const e = Math.round((R(a.containerId).width - n.width)/2); ok = Math.abs(n.x - e) <= tol; d = { expectedX:e, actualX:Math.round(n.x) }; }
+    if (a.type === 'below')    { const an = R(a.anchorId); const e = Math.round(an.y + an.height + (a.gap ?? 10)); ok = Math.abs(n.y - e) <= tol; d = { expectedY:e, actualY:Math.round(n.y) }; }
+    if (ok) passed++; out.push({ ...d, type:a.type, nodeId:a.nodeId, pass:ok });
+  }
+  return { pass: passed === assertions.length, passed, total: assertions.length, failures: out.filter(r => !r.pass) };
+}
+// Example: every caption below its input at the same gap; button centered.
+```
