@@ -965,7 +965,29 @@ b.x = MARGIN; b.cornerRadius = refButtonRadius;
   screen and 40px on the next.
 - Reuse native platform assets (keyboard, status bar, pickers, permission
   dialogs) — never hand-build a keyboard from 30+ key rectangles.
-- Reuse icons from the components library — never hand-draw an icon that exists.
+- **Icons — search the library and place an INSTANCE; never hand-draw a glyph that exists.**
+  Every UI glyph (back arrow, chevron, eye / eye-off, close, check, search, plus,
+  play, home, share, heart…) already exists as a component in the file's icon
+  library (e.g. a page named `Icons`). Hand-drawing one with `createVector`/boolean
+  ops is a DEFECT. BEFORE creating any icon, search the library and instance the match:
+
+  ```javascript
+  await figma.loadAllPagesAsync();
+  const need = 'arrow left';                    // synonyms: 'chevron left', 'round arrow left'
+  const kws  = need.toLowerCase().split(' ');
+  const hits = figma.root.findAllWithCriteria({ types: ['COMPONENT','COMPONENT_SET'] })
+    .filter(c => kws.every(k => c.name.toLowerCase().includes(k)));
+  let comp = hits[0];
+  if (comp && comp.type === 'COMPONENT_SET') comp = comp.defaultVariant;
+  const icon = comp.createInstance();           // a LINKED instance, never a copy
+  icon.resize(24, 24); parent.appendChild(icon); icon.x = X; icon.y = Y;
+  ```
+
+  Synonyms to try before giving up: back arrow → "arrow left" / "chevron left" /
+  "round arrow left"; show/hide password → "eye" and "eye closed" / "eye off";
+  dismiss → "close" / "x"; done → "check". Recolor by setting the instance's fills —
+  do NOT detach it. Only if ZERO components match after trying synonyms may you
+  hand-draw, and you must say so in your report.
 - Image tiles (artists, albums, avatars) must contain REAL sourced photos, never
   a flat colored circle.
 - **Brand logos, wordmarks, and mascots MUST be sourced as real images** — fetch
@@ -998,6 +1020,8 @@ async function verifyLayout(assertions) {
     if (a.type === 'equals')   { const v = n[a.prop]; ok = Math.abs(v - a.value) <= tol; d = { prop:a.prop, expected:a.value, actual:Math.round(v) }; }
     if (a.type === 'centeredX'){ const c = await R(a.containerId); const e = Math.round((c.width - n.width)/2); ok = Math.abs(n.x - e) <= tol; d = { expectedX:e, actualX:Math.round(n.x) }; }
     if (a.type === 'below')    { const an = await R(a.anchorId); const e = Math.round(an.y + an.height + (a.gap ?? 10)); ok = Math.abs(n.y - e) <= tol; d = { expectedY:e, actualY:Math.round(n.y) }; }
+    if (a.type === 'isImage')  { const f = n.fills; ok = Array.isArray(f) && f.some(x => x.type === 'IMAGE'); d = { hasImageFill: ok }; }
+    if (a.type === 'isInstance'){ ok = n.type === 'INSTANCE'; d = { nodeType: n.type }; }  // icon must be a library instance, not a hand-drawn VECTOR
     if (ok) passed++; out.push({ ...d, type:a.type, nodeId:a.nodeId, pass:ok });
   }
   return { pass: passed === assertions.length, passed, total: assertions.length, failures: out.filter(r => !r.pass) };
