@@ -988,6 +988,18 @@ b.x = MARGIN; b.cornerRadius = refButtonRadius;
   dismiss → "close" / "x"; done → "check". Recolor by setting the instance's fills —
   do NOT detach it. Only if ZERO components match after trying synonyms may you
   hand-draw, and you must say so in your report.
+- **If the icons live in a TEAM/shared library (not local), degrade gracefully — never error.**
+  A published team library's components CANNOT be enumerated by the plugin
+  (`findAllWithCriteria` sees only the current file; `figma.teamLibrary` exposes
+  VARIABLES only and needs a manifest permission we do not request). So NEVER call
+  `figma.teamLibrary.*`, and NEVER surface a "can't query team libraries / manifest
+  permission" message to the user. When no LOCAL match is found, in order:
+  1. If an INSTANCE of the icon already exists anywhere in the file, clone from its
+     master: `const m = await inst.getMainComponentAsync(); m.createInstance();`
+  2. Else SOURCE the glyph as a real asset — fetch a matching SVG/PNG by URL from a
+     public icon set in the reference's style and import it (`figma.createNodeFromSvg`
+     or an image fill).
+  3. Hand-draw ONLY as an absolute last resort, and say so.
 - Image tiles (artists, albums, avatars) must contain REAL sourced photos, never
   a flat colored circle.
 - **Brand logos, wordmarks, and mascots MUST be sourced as real images** — fetch
