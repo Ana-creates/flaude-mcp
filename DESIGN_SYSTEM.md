@@ -911,13 +911,18 @@ screen by placing INSTANCES of those masters plus screen-specific content.
 Figma enforces that an instance matches its master's size/style — so shared
 elements CANNOT drift. This is structural, not a suggestion.
 
+### 16.1b ASYNC NODE ACCESS IS MANDATORY (dynamic-page mode)
+Figma runs in `documentAccess: dynamic-page`. Sync node APIs THROW and stall the
+build. Always `await figma.getNodeByIdAsync(id)`, `await figma.setCurrentPageAsync(p)`,
+`await figma.currentPage.loadAsync()`. Never `figma.getNodeById`.
+
 ### 16.2 COMPUTE positions with MATH — never eyeball a screenshot
 Screenshot-estimated coordinates are the #1 source of cross-screen drift.
 Read the real node coordinates via figma_execute and COMPUTE placement:
 
 ```javascript
 // Anchor a caption/helper text exactly below an input (same gap every screen):
-const input = figma.getNodeById(inputId);
+const input = await figma.getNodeByIdAsync(inputId);
 caption.y = Math.round(input.y + input.height + GAP);   // e.g. GAP = 10
 caption.x = Math.round(input.x);
 
@@ -940,7 +945,7 @@ small inline pill. NEVER default to hug. NEVER reuse another app's button width
 radius, and x position — measured, not guessed.
 
 ```javascript
-const b = figma.getNodeById(buttonId);
+const b = await figma.getNodeByIdAsync(buttonId);
 b.layoutMode = 'HORIZONTAL';
 b.counterAxisSizingMode = 'FIXED';
 b.primaryAxisAlignItems = 'CENTER';
@@ -985,14 +990,14 @@ failures and re-run until pass:true. Correctness is decided by MATH, not by how
 the screenshot looks.
 
 ```javascript
-function verifyLayout(assertions) {
-  const R = (id) => figma.getNodeById(id);
+async function verifyLayout(assertions) {
+  const R = (id) => figma.getNodeByIdAsync(id);
   const out = []; let passed = 0;
   for (const a of assertions) {
-    const n = R(a.nodeId); const tol = a.tolerance ?? 1; let ok = false, d = {};
+    const n = await R(a.nodeId); const tol = a.tolerance ?? 1; let ok = false, d = {};
     if (a.type === 'equals')   { const v = n[a.prop]; ok = Math.abs(v - a.value) <= tol; d = { prop:a.prop, expected:a.value, actual:Math.round(v) }; }
-    if (a.type === 'centeredX'){ const e = Math.round((R(a.containerId).width - n.width)/2); ok = Math.abs(n.x - e) <= tol; d = { expectedX:e, actualX:Math.round(n.x) }; }
-    if (a.type === 'below')    { const an = R(a.anchorId); const e = Math.round(an.y + an.height + (a.gap ?? 10)); ok = Math.abs(n.y - e) <= tol; d = { expectedY:e, actualY:Math.round(n.y) }; }
+    if (a.type === 'centeredX'){ const c = await R(a.containerId); const e = Math.round((c.width - n.width)/2); ok = Math.abs(n.x - e) <= tol; d = { expectedX:e, actualX:Math.round(n.x) }; }
+    if (a.type === 'below')    { const an = await R(a.anchorId); const e = Math.round(an.y + an.height + (a.gap ?? 10)); ok = Math.abs(n.y - e) <= tol; d = { expectedY:e, actualY:Math.round(n.y) }; }
     if (ok) passed++; out.push({ ...d, type:a.type, nodeId:a.nodeId, pass:ok });
   }
   return { pass: passed === assertions.length, passed, total: assertions.length, failures: out.filter(r => !r.pass) };
