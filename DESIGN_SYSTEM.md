@@ -1212,3 +1212,83 @@ const allText = parent.findAll(c => c.type === 'TEXT');
 > When you discover a new canonical recipe (or a gotcha that wasted a step),
 > APPEND it here so the next build starts from it. This cookbook is how the
 > system gets faster over time.
+
+---
+
+## 18. RECURRING-DEFECTS GATE (run before declaring ANY reference-recreation done)
+
+These are the exact defects that keep recurring. They happen because the rules
+above are prose the agent SOMETIMES follows. This section makes them a GATE: for
+every screen you recreate, you MUST resolve each class A–E and report it. "It
+looked right in the screenshot" is NOT acceptable — decide by measuring/sampling
+the REFERENCE, then asserting.
+
+### 18.A ICONS & NAV/TAB BARS — always instances, always match the reference SHAPE
+- Every glyph (nav icons, tab-bar icons, toolbar actions, chevrons, plus, eye,
+  bell, avatar) MUST be a library INSTANCE (see 16.4). Assert `{type:'isInstance'}`
+  on EACH nav/tab glyph. A hand-drawn nav icon is a FAIL.
+- NEVER free-build a bottom nav / tab bar. Build it as ONE component whose icons
+  are library instances, and MATCH THE REFERENCE'S SHAPE exactly:
+  - flat bar, floating pill, or **curved/notched** bar — look and replicate. If the
+    reference tab bar is curved (e.g. a concave/rounded top edge), build the curve
+    (a filled vector/rounded container), do not substitute a plain rectangle.
+  - match the active-item treatment (filled circle behind the active icon, color).
+- Top nav bars: match vertical placement and internal alignment to the reference —
+  a top bar must sit flush at the top with items on the correct baseline, not
+  floated or vertically off.
+
+### 18.B TEXT — measure position AND size from the reference
+For EVERY text node: its x, y, AND fontSize/lineHeight/weight come from the
+reference, measured — never placed "about here" or sized by habit. Assert
+`{type:'equals', prop:'fontSize', value:REF}` and position (`below`/`equals` on
+x/y) for headline, body, captions, list rows. Text drifting inside a card/box
+(as in checkout delivery rows, or Keen list rows) is a FAIL.
+
+### 18.C SIGNATURE-VISUAL PROTOCOL — sample, don't approximate
+When a screen has a distinctive visual (gradient, glow/aura, blur, rotation,
+stacked/glossy cards, custom shape), it is a SIGNATURE element. Approximating it
+is the #1 quality loss. Do this instead:
+1. NAME it up front ("Exoplan aurora gradient", "plus-button glow", "First 1000
+   glossy card stack", "Quiet Energy tilted card").
+2. SAMPLE real colors from the reference IMAGE at multiple points (top/mid/bottom
+   of a gradient, center+edge of a glow). Use those exact hex/RGB values and the
+   same stop positions — do NOT guess "green-ish" or "grey-ish". A gradient that
+   reads as a different hue/temperature than the reference is a FAIL.
+   - Glows/auras are RADIAL gradients with a tight bright core fading to
+     transparent — match the radius and softness, not a big diffuse blob.
+3. REPLICATE the transform: rotation angle (measure the tilt, e.g. ~-8°),
+   position offsets measured from the reference (e.g. move the circle up/right to
+   the exact ref position). Set `node.rotation` — do not leave a tilted element flat.
+4. PRESERVE count & finish: if the reference stacks FOUR glossy cards, build four
+   (descending size/opacity, glossy = subtle top highlight + soft shadow + slight
+   blur), not two flat ones. Match card scale (theirs are often smaller).
+5. Decorative line-art (e.g. the Quiet Energy "paper hole" markers) must match
+   color and style — white/paper holes stay white, arrows/rays as in the ref.
+
+### 18.D NO PLACEHOLDERS — real logos/images or it fails
+An empty box / grey rectangle where a logo, avatar, app icon, or photo belongs is
+a FAIL (see 16.4 image rules). Source the REAL asset (logo by URL, real photo) and
+paint it as an image fill. Never leave a placeholder that overlaps text or sits
+empty. Assert `{type:'isImage'}` on every logo/photo node before done.
+
+### 18.E SYSTEM CHROME — status bar theme matches the background
+The status bar (clock + signal/wifi/battery) content color MUST match the screen:
+- Light/white background → DARK (black) status-bar content.
+- Dark background → LIGHT (white) status-bar content.
+Match the reference. A dark status bar on a white screen (or vice-versa) is a FAIL.
+Also match the home indicator color to the background.
+
+### 18.F THE GATE
+Before declaring a screen done, produce this checklist with an explicit PASS/FAIL
+per line, then FIX every FAIL and re-run:
+```
+[ ] A icons/nav: every nav+tab glyph isInstance; nav/tab bar shape matches ref
+[ ] B text: every text node position + fontSize measured from ref (asserted)
+[ ] C signature: gradients/glows/rotations/stacks sampled from ref, count preserved
+[ ] D assets: every logo/photo is a real image fill (no placeholder boxes)
+[ ] E chrome: status-bar + home-indicator theme matches background/ref
+[ ] side-by-side visual diff vs the REF frame above passes
+```
+A screen is DONE only when all six are PASS. This gate is what makes output
+consistent (kills the "sometimes right, sometimes not" problem) AND faster
+(measuring/sampling once beats many screenshot-eyeball-fix loops).
