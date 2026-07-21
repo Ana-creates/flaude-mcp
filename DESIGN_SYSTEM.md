@@ -1292,3 +1292,33 @@ per line, then FIX every FAIL and re-run:
 A screen is DONE only when all six are PASS. This gate is what makes output
 consistent (kills the "sometimes right, sometimes not" problem) AND faster
 (measuring/sampling once beats many screenshot-eyeball-fix loops).
+
+### 18.G EFFICIENCY & TRUST RULES (do not waste tokens; do not trust numbers blindly)
+Hard-won from real sessions where numeric gates passed on WRONG screens and
+orchestration wasted tokens. These are mandatory.
+
+1. **A numeric gate can only REJECT, never APPROVE.** `verifyLayout`/§15 scores are
+   a cheap PRE-FILTER: use them to catch gross geometry errors fast. A 100/100 or
+   "27/27 pass" means NOTHING about fidelity — screens have scored perfect while
+   showing the wrong content, hand-drawn icons, or the wrong gradient. NEVER
+   declare a screen done because the numbers passed.
+2. **Only a final side-by-side visual check against the REFERENCE can mark a screen
+   done — and it is never overridden by a number.** Vision is the judge; math is
+   the assistant.
+3. **Capture the reference image ONCE; hold it. Never re-screenshot a REF frame.**
+   The `REF /` frame IS the Refero image painted as a fill — screenshotting it just
+   re-captures a picture you already fetched from `refero_get_screen_image`. Fetch
+   the reference once, keep it as the ground truth, and compare against it.
+4. **In Figma, screenshot ONLY what you are building — never the reference.** One
+   build screenshot per screen, compared to the held reference image. Do not
+   screenshot the reference and the build separately every iteration.
+5. **No eyeball LOOP. Look once, up front (extract numbers + sample colors/rotation/
+   counts into a spec); build once; verify once (the mandatory final visual check).**
+   If the final check fails, make ONE targeted fix — do not open an unbounded
+   screenshot→fix→screenshot cycle.
+6. **Work from the reference IMAGE, not the frame NAME.** Frame names can be
+   mislabeled/shuffled. Match the pixels you see, never a spec written from a title.
+   (This exact mistake overwrote a correct screen with wrong content.)
+7. **Orchestration: do not poll a running build with sleep/tail heartbeats.**
+   Background builds buffer all output until the end — peeking early returns nothing
+   and wastes turns. Size the wait to the job and read the result ONCE.
