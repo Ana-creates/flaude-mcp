@@ -1004,3 +1004,43 @@ async function verifyLayout(assertions) {
 }
 // Example: every caption below its input at the same gap; button centered.
 ```
+
+### 16.6 REAL master COMPONENTS are mandatory — assert them
+Recurring elements (status bar, home indicator, nav header, back button, input,
+primary button, option card) MUST be real `figma.createComponent()` masters, and
+each screen MUST place INSTANCES via `master.createInstance()`. A flow built from
+raw FRAME copies is a FAILURE. Gate (must pass before done):
+
+```javascript
+(async () => {
+  await figma.currentPage.loadAsync();
+  const all = figma.currentPage.findAll(() => true);
+  const comps = all.filter(n => n.type === 'COMPONENT').length;
+  const insts = all.filter(n => n.type === 'INSTANCE').length;
+  return { comps, insts, pass: comps >= 5 && insts >= comps * 2 };
+})();
+```
+
+### 16.7 NATIVE iOS CHROME — instance from the kit, NEVER hand-build, NEVER emoji
+Status bar, home indicator, keyboards, sheets, pickers are PRE-MADE components on
+an `_iOS Kit` page. Every screen INSTANCES them — never redraw. Status-bar
+signal/wifi/battery as EMOJI or text glyphs (`●●●● 🛜 🔋`) is BANNED — they are
+vector components. If the kit or a component is missing, STOP and report it.
+
+### 16.8 SPEECH BUBBLES / NOTIFICATION CALLOUTS need a tail, text INSIDE
+A chat/coach bubble MUST have a tail/pointer aimed at the speaker (matching the
+reference's side/shape) and the text placed INSIDE the bubble as a padded child,
+never as a floating sibling. `hasTail:false` or text-as-sibling is WRONG.
+
+### 16.9 REGRESSION CHECKLIST — self-audit before EVERY "done"
+Verify each with figma_execute reads, fix any failure, and APPEND new defects:
+1. Button width matches the reference (full-width vs pill).
+2. Logos/mascots are real image fills (isImage), never vector-drawn.
+3. Status bar + home indicator are KIT INSTANCES, never emoji.
+4. Recurring elements are COMPONENT masters used as INSTANCES (16.6 gate).
+5. Bubbles have a tail and text inside (16.8).
+6. Option/answer text uses EXACT reference words.
+7. Type sizes are one shared spec across screens.
+8. Captions math-anchored at the same gap.
+9. All node access is async (getNodeByIdAsync).
+10. Export each screen and visually diff against its REF.
