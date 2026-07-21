@@ -1044,3 +1044,135 @@ Verify each with figma_execute reads, fix any failure, and APPEND new defects:
 8. Captions math-anchored at the same gap.
 9. All node access is async (getNodeByIdAsync).
 10. Export each screen and visually diff against its REF.
+
+--
+
+## 17. FIGMA API COOKBOOK — canonical recipes (copy, don't re-derive)
+These are the ONE correct way to do each primitive. Do not invent variants, do
+not "google it" — use these. Every snippet assumes dynamic-page mode, so all
+node lookups are async and everything runs in an async IIFE.
+
+### 17.1 Load fonts BEFORE any text (skipping this THROWS)
+```javascript
+// You MUST load every font weight you will use before setting characters.
+await figma.loadFontAsync({ family: "Inter", style: "Regular" });
+await figma.loadFontAsync({ family: "Inter", style: "Bold" });
+```
+
+### 17.2 Create a frame (the screen container)
+```javascript
+const screen = figma.createFrame();
+screen.name = "Duolingo / Welcome";
+screen.resize(390, 844);
+screen.x = 0; screen.y = 0;
+screen.cornerRadius = 0;
+screen.fills = [{ type: 'SOLID', color: { r: 1, g: 1, b: 1 } }];
+figma.currentPage.appendChild(screen);
+```
+
+### 17.3 Text node (create → parent → then set characters)
+```javascript
+const t = figma.createText();
+t.fontName = { family: "Inter", style: "Bold" };  // font already loaded (17.1)
+t.characters = "What would you like to learn?";
+t.fontSize = 22; t.lineHeight = { value: 28, unit: "PIXELS" };
+t.fills = [{ type: 'SOLID', color: { r: 0.16, g: 0.16, b: 0.18 } }];
+screen.appendChild(t);
+t.x = 24; t.y = 120;
+```
+
+### 17.4 Make a frame BETTER with auto-layout (hug / fill / gap / padding)
+```javascript
+const col = figma.createFrame();
+col.layoutMode = 'VERTICAL';            // or 'HORIZONTAL'
+col.primaryAxisSizingMode = 'AUTO';     // AUTO = HUG contents; 'FIXED' = set size
+col.counterAxisSizingMode = 'FIXED';
+col.itemSpacing = 12;                    // gap between children
+col.paddingTop = col.paddingBottom = 16;
+col.paddingLeft = col.paddingRight = 24;
+col.primaryAxisAlignItems = 'MIN';       // MIN | CENTER | MAX | SPACE_BETWEEN
+col.counterAxisAlignItems = 'CENTER';
+// A child can STRETCH to fill the counter axis (e.g. full-width button):
+child.layoutAlign = 'STRETCH';
+// A child can GROW to fill the primary axis:
+child.layoutGrow = 1;
+```
+
+### 17.5 Create a MASTER COMPONENT, then INSTANCES (the core of 16.1/16.6)
+```javascript
+// Build the visual inside a frame first, then convert to a component:
+const btn = figma.createComponent();
+btn.name = "Button / Primary";
+btn.resize(342, 52); btn.cornerRadius = 16;
+btn.layoutMode = 'HORIZONTAL';
+btn.primaryAxisAlignItems = 'CENTER'; btn.counterAxisAlignItems = 'CENTER';
+btn.fills = [{ type: 'SOLID', color: { r: 0.35, g: 0.8, b: 0.15 } }];
+const label = figma.createText();
+label.fontName = { family: "Inter", style: "Bold" };
+label.characters = "CONTINUE"; label.fills = [{ type:'SOLID', color:{r:1,g:1,b:1} }];
+btn.appendChild(label);
+// Put masters on the _iOS Kit / _Masters page, NOT on the screen:
+// Now stamp instances onto each screen:
+const inst = btn.createInstance();
+screen.appendChild(inst);
+inst.x = 24; inst.y = 760;
+// Override text on an instance without breaking the link:
+const it = inst.findOne(n => n.type === 'TEXT'); it.characters = "GET STARTED";
+```
+
+### 17.6 Turn several variants into a COMPONENT SET (variants)
+```javascript
+// Create each variant component (same base name, "Prop=Value" naming), then:
+const set = figma.combineAsVariants([compDefault, compPressed], figma.currentPage);
+set.name = "Button / Primary";
+// components were named e.g. "State=Default", "State=Pressed"
+```
+
+### 17.7 MERGE / combine shapes — pick the right operation
+```javascript
+// Boolean UNION (merge overlapping vectors into one shape, e.g. an icon):
+const u = figma.union([shapeA, shapeB], figma.currentPage);
+// Other booleans: figma.subtract / figma.intersect / figma.exclude
+// FLATTEN to a single vector (bake it down):
+const v = figma.flatten([u]);
+// GROUP (keep children editable, just organize): 
+const g = figma.group([nodeA, nodeB], figma.currentPage);
+g.name = "Owl + Bubble";
+// Rule of thumb: GROUP to organize, UNION/FLATTEN only for real vector art.
+// For layout, prefer an auto-layout FRAME over a group (17.4).
+```
+
+### 17.8 Image fill from a URL (real photos/logos — rule 16.4)
+```javascript
+const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+const img = figma.createImage(bytes);          // returns { hash }
+node.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageHash: img.hash }];
+// scaleMode: 'FILL' | 'FIT' | 'CROP' | 'TILE'. Use CROP + imageTransform to frame.
+```
+
+### 17.9 Rounded "pill" / corner control
+```javascript
+node.cornerRadius = 26;                 // uniform
+node.topLeftRadius = node.topRightRadius = 16;   // per-corner
+node.bottomLeftRadius = node.bottomRightRadius = 0;
+```
+
+### 17.10 Reorder, position within parent, and center
+```javascript
+parent.appendChild(node);                 // append = on top (last child)
+parent.insertChild(0, node);              // send to back
+node.x = Math.round((parent.width - node.width) / 2);  // center horizontally
+```
+
+### 17.11 Reading layout safely (async, dynamic-page)
+```javascript
+const n = await figma.getNodeByIdAsync(id);
+const { x, y, width, height } = n;        // absolute within its parent frame
+// To find a child by name/type:
+const found = parent.findOne(c => c.name === "StatusBar");
+const allText = parent.findAll(c => c.type === 'TEXT');
+```
+
+> When you discover a new canonical recipe (or a gotcha that wasted a step),
+> APPEND it here so the next build starts from it. This cookbook is how the
+> system gets faster over time.
