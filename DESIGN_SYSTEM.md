@@ -930,22 +930,28 @@ Verify by READING BACK node.x/node.y numerically — never by judging a picture.
 Use screenshots only for a final visual sanity check, never as the coordinate
 source.
 
-### 16.3 Buttons HUG their content — never a fixed width
-A 'Next'/'Continue'/'Create account' button is a HUG-CONTENT auto-layout pill:
-width = label + fixed horizontal padding, with a fixed height + radius. So
-'Next' is narrow and 'Create account' is wider — that is CORRECT. Forcing a fixed
-width looks wrong vs. the reference. Build it once, reuse the SAME spec everywhere:
+### 16.3 Button width MUST MATCH THE REFERENCE — measure, don't assume
+THE REFERENCE SCREEN DECIDES THE BUTTON WIDTH. There is no universal button
+shape. If the reference button spans the content column edge-to-edge it is
+FULL-WIDTH (the default for most onboarding/CTA buttons — Duolingo "CHECK",
+"CONTINUE"). Only make a button hug-content when the reference is clearly a
+small inline pill. NEVER default to hug. NEVER reuse another app's button width
+(e.g. Spotify's pill) on a different app. Match the reference's width, height,
+radius, and x position — measured, not guessed.
 
 ```javascript
-const b = figma.getNodeById(buttonId);   // a FRAME containing the label text
+const b = figma.getNodeById(buttonId);
 b.layoutMode = 'HORIZONTAL';
-b.primaryAxisSizingMode = 'AUTO';    // width hugs the label
-b.counterAxisSizingMode = 'FIXED';   // fixed height
+b.counterAxisSizingMode = 'FIXED';
 b.primaryAxisAlignItems = 'CENTER';
 b.counterAxisAlignItems = 'CENTER';
-b.paddingLeft = b.paddingRight = 32;  b.paddingTop = b.paddingBottom = 0;
-b.resize(b.width, 52);  b.cornerRadius = 26;
-// then center it: b.x = Math.round((390 - b.width) / 2);
+// FULL-WIDTH default:
+const MARGIN = 24;
+b.primaryAxisSizingMode = 'FIXED';
+b.resize(390 - 2*MARGIN, refButtonHeight);
+b.x = MARGIN; b.cornerRadius = refButtonRadius;
+// HUG only when the reference is a tight inline pill:
+// b.primaryAxisSizingMode='AUTO'; b.paddingLeft=b.paddingRight=32; b.x=Math.round((390-b.width)/2);
 ```
 
 ### 16.4 Shared TEXT STYLES, reused native assets, real images
@@ -967,7 +973,13 @@ b.resize(b.width, 52);  b.cornerRadius = 26;
   thumbnail as a last resort. A logo or mascot assembled from >2 vector primitives
   is a rule violation and must fail the screen.
 
-### 16.5 GATE — verify with numbers before declaring a screen done
+### 16.5 GATE — verify with numbers, THEN verify against the reference
+`verifyLayout` checks INTERNAL geometry only — it does NOT check fidelity to the
+Refero original. A screen can pass 5/5 and look nothing like the source. Derive
+assertion numbers FROM THE REFERENCE, then visually diff the clone against the
+reference frame above it. A passing gate is necessary but NOT sufficient.
+
+### 16.5b GATE
 Run this assertion via figma_execute. If it returns pass:false, fix the listed
 failures and re-run until pass:true. Correctness is decided by MATH, not by how
 the screenshot looks.
