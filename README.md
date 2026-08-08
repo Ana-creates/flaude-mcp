@@ -1,8 +1,45 @@
-# Figma Editor MCP Server
+<p align="center">
+  <a href="https://flaude.app">
+    <img src="https://www.flaude.app/flaude-logo.png" alt="Flaude" width="96" />
+  </a>
+</p>
 
-An MCP (Model Context Protocol) server that enables Claude to **read AND write** to Figma files. Works with any app - just define your schema.
+<h1 align="center">Figma Editor MCP Server</h1>
 
-> **Pro Feature**: This MCP integration requires a [Flaude Pro](https://flaude.com/upgrade) subscription. Free users can use the Flaude plugin directly in Figma, but Claude Code integration is Pro-only.
+<p align="center">
+  An MCP (Model Context Protocol) server that enables Claude to <b>read AND write</b> to Figma files.<br/>
+  Works with any app — just define your schema.
+</p>
+
+---
+
+> ## 📦 This repository is archived
+>
+> Flaude's design engine now runs as a **hosted service**. Development moved there in
+> **July 2026** — this open-source relay remains available and functional, but is no
+> longer updated.
+>
+> Everything that makes Flaude *good* is server-side: reference-matched building,
+> pixel-diff fidelity gates, the structural lint, the self-improving defect flywheel.
+> Those need hosted infrastructure and a model of what "correct" looks like across
+> every design that transits the service. They can't ship as a local relay.
+>
+> **[Flaude Pro →](https://flaude.app/pricing)** · [how the MCP works](https://flaude.app/mcp)
+
+### What lives where
+
+| | This relay (archived) | [Flaude Pro](https://flaude.app/pricing) (hosted) |
+|---|---|---|
+| Create / edit Figma nodes via Claude | ✅ | ✅ |
+| Schema-aware screen generation | ✅ | ✅ |
+| Reference-matched building (build from a screenshot, verified) | — | ✅ |
+| Pixel-diff fidelity gates with a pass bar | — | ✅ |
+| Structural design lint (24 mechanical checks) | — | ✅ |
+| Self-improving defect flywheel | — | ✅ |
+| Brand-style extraction into your brand kit | — | ✅ |
+| Updates | stopped July 2026 | continuous |
+
+---
 
 ## Architecture
 
@@ -235,3 +272,21 @@ With the MCP server running:
 ## License
 
 MIT
+
+---
+
+<p align="center">
+  <a href="https://flaude.app">
+    <img src="https://www.flaude.app/flaude-logo.png" alt="Flaude" width="64" />
+  </a>
+</p>
+
+<p align="center">
+  <b>Looking for the maintained version?</b><br/>
+  Flaude's hosted MCP is where all development happens now — reference-matched builds,<br/>
+  pixel-diff verification, structural lint, and a defect flywheel that gets smarter with every design.
+</p>
+
+<p align="center">
+  <a href="https://flaude.app/pricing"><b>Get Flaude Pro →</b></a>
+</p>
