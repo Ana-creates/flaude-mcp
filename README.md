@@ -24,11 +24,11 @@
 > Those need hosted infrastructure and a model of what "correct" looks like across
 > every design that transits the service. They can't ship as a local relay.
 >
-> **[Flaude Pro →](https://flaude.app/pricing)** · [how the MCP works](https://flaude.app/mcp)
+> **[Flaude Pro MCP →](https://www.flaude.app/connect)** · [pricing](https://flaude.app/pricing)
 
 ### What lives where
 
-| | This relay (archived) | [Flaude Pro](https://flaude.app/pricing) (hosted) |
+| | This relay (archived) | [Flaude Pro](https://www.flaude.app/connect) (hosted) |
 |---|---|---|
 | Create / edit Figma nodes via Claude | ✅ | ✅ |
 | Schema-aware screen generation | ✅ | ✅ |
@@ -288,5 +288,5 @@ MIT
 </p>
 
 <p align="center">
-  <a href="https://flaude.app/pricing"><b>Get Flaude Pro →</b></a>
+  <a href="https://www.flaude.app/connect"><b>Connect Flaude Pro →</b></a>
 </p>
